@@ -1,0 +1,22 @@
+.vapid.json
+
+# Local environment and credentials
+.env*
+!.env.example
+
+# Dependencies and generated output
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+
+# Local tooling and logs
+.vercel/
+.codex/
+*.log
+.DS_Store
+Thumbs.db
