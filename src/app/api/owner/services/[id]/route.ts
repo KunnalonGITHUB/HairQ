@@ -1,13 +1,15 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { bookings, queueEntries, services, staffServices } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { serviceRepository, staffServiceRepository, queueRepository, bookingRepository } from "@/lib/firestore/repositories";
+import { and, eq } from "@/lib/firestore/query";
+
+import { bookings, queueEntries, services, staffServices } from "@/lib/firestore/fields";
 import { bool, fail, num, ok, str, withOwner } from "@/lib/api-helpers";
 
 export async function PATCH(request: Request, ctx: { params: Promise<{ id: string }> }) {
   return withOwner(async (user) => {
     const { id } = await ctx.params;
     const serviceId = Number(id);
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
 
     const patch: Record<string, unknown> = {};
     if ("name" in body) {
@@ -27,28 +29,20 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
     if ("sortOrder" in body) patch.sortOrder = num(body.sortOrder) ?? 0;
 
     if (Object.keys(patch).length > 0) {
-      const [updated] = await db
-        .update(services)
-        .set(patch)
-        .where(and(eq(services.id, serviceId), eq(services.salonId, user.salonId)))
-        .returning();
+      const [updated] = await serviceRepository.update(user.salonId, and(eq(services.id, serviceId), eq(services.salonId, user.salonId)), patch);
       if (!updated) return fail("That service no longer exists.", 404);
     }
 
     if (Array.isArray(body.staffIds)) {
       const staffIds = (body.staffIds as unknown[]).map(Number).filter(Boolean);
-      await db.delete(staffServices).where(
-        and(eq(staffServices.salonId, user.salonId), eq(staffServices.serviceId, serviceId)),
-      );
+      await staffServiceRepository.remove(user.salonId, and(eq(staffServices.salonId, user.salonId), eq(staffServices.serviceId, serviceId)));
       if (staffIds.length > 0) {
-        await db
-          .insert(staffServices)
-          .values(staffIds.map((staffId) => ({ salonId: user.salonId, staffId, serviceId })));
+        await staffServiceRepository.create(user.salonId, staffIds.map((staffId) => ({ salonId: user.salonId, staffId, serviceId })));
       }
     }
 
     return ok({ ok: true });
-  });
+  }, request);
 }
 
 export async function DELETE(_request: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -57,19 +51,16 @@ export async function DELETE(_request: Request, ctx: { params: Promise<{ id: str
     const serviceId = Number(id);
 
     const [inQueue, booked] = await Promise.all([
-      db.select({ id: queueEntries.id }).from(queueEntries).where(eq(queueEntries.serviceId, serviceId)).limit(1),
-      db.select({ id: bookings.id }).from(bookings).where(eq(bookings.serviceId, serviceId)).limit(1),
+      queueRepository.find(user.salonId, { select: { id: queueEntries.id }, where: eq(queueEntries.serviceId, serviceId), limit: 1 }),
+      bookingRepository.find(user.salonId, { select: { id: bookings.id }, where: eq(bookings.serviceId, serviceId), limit: 1 }),
     ]);
     if (inQueue.length > 0 || booked.length > 0) {
-      await db
-        .update(services)
-        .set({ active: false })
-        .where(and(eq(services.id, serviceId), eq(services.salonId, user.salonId)));
+      await serviceRepository.update(user.salonId, and(eq(services.id, serviceId), eq(services.salonId, user.salonId)), { active: false });
       return ok({ ok: true, archived: true });
     }
 
-    await db.delete(staffServices).where(eq(staffServices.serviceId, serviceId));
-    await db.delete(services).where(and(eq(services.id, serviceId), eq(services.salonId, user.salonId)));
+    await staffServiceRepository.remove(user.salonId, eq(staffServices.serviceId, serviceId));
+    await serviceRepository.remove(user.salonId, and(eq(services.id, serviceId), eq(services.salonId, user.salonId)));
     return ok({ ok: true });
-  });
+  }, _request);
 }

@@ -1,6 +1,8 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { bookings, services } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { serviceRepository, bookingRepository } from "@/lib/firestore/repositories";
+import { and, eq } from "@/lib/firestore/query";
+
+import { bookings, services } from "@/lib/firestore/fields";
 import { fail, guarded, num, ok, str, validPhone } from "@/lib/api-helpers";
 import { newToken } from "@/lib/auth";
 import { buildSlots, isSlotTaken } from "@/lib/availability";
@@ -81,7 +83,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
       return fail("This salon isn't taking online appointments right now.", 409);
     }
 
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const name = str(body.name);
     const phone = str(body.phone);
     const serviceId = num(body.serviceId);
@@ -96,12 +98,12 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
     const scheduledAt = new Date(when);
     if (Number.isNaN(scheduledAt.getTime())) return fail("That time slot didn't look right.");
     if (scheduledAt.getTime() < Date.now()) return fail("That time has already passed. Pick another slot.");
+    const latest = new Date();
+    latest.setHours(23, 59, 59, 999);
+    latest.setDate(latest.getDate() + salon.bookingHorizonDays - 1);
+    if (scheduledAt > latest) return fail("That date is outside this salon's booking window.", 400);
 
-    const svc = await db
-      .select()
-      .from(services)
-      .where(and(eq(services.id, serviceId), eq(services.salonId, salon.id), eq(services.active, true)))
-      .limit(1);
+    const svc = await serviceRepository.find(salon.id, { where: and(eq(services.id, serviceId), eq(services.salonId, salon.id), eq(services.active, true)), limit: 1 });
     if (!svc[0]) return fail("That service isn't available right now.");
 
     const existing = await dayBookings(salon.id, scheduledAt);
@@ -141,9 +143,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
       preferredStaffId: staffId,
     });
 
-    const [booking] = await db
-      .insert(bookings)
-      .values({
+    const [booking] = await bookingRepository.create(salon.id, {
         salonId: salon.id,
         customerId: customer.id,
         serviceId,
@@ -153,8 +153,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
         durationMin: svc[0].durationMin,
         source: "online",
         notes: str(body.notes) || null,
-      })
-      .returning();
+      });
 
     await pushNotification({
       salonId: salon.id,

@@ -17,7 +17,8 @@ import {
   IconCalendar,
   IconX,
 } from "@/components/icons";
-import { cx, Toaster } from "@/components/ui";
+import { cx, Toaster, toast } from "@/components/ui";
+import { logoutHairQ } from "@/lib/auth-client";
 
 const NAV = [
   {
@@ -82,13 +83,11 @@ export function OwnerShell({
   }, [pathname]);
 
   const logout = async () => {
-    await fetch("/api/auth", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "logout" }),
-    });
-    router.push("/login");
-    router.refresh();
+    try {
+      await logoutHairQ();
+      router.push("/login");
+      router.refresh();
+    } catch (error) { toast(error instanceof Error ? error.message : "Could not sign out. Please try again.", "err"); }
   };
 
   const nav = (

@@ -1,0 +1,8 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    { "collectionGroup": "pushSubscriptions", "fieldPath": "p256dh", "indexes": [] },
+    { "collectionGroup": "pushSubscriptions", "fieldPath": "auth", "indexes": [] },
+    { "collectionGroup": "staff", "fieldPath": "serviceLinks", "indexes": [] }
+  ]
+}

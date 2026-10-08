@@ -1,6 +1,5 @@
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { pushSubscriptions } from "@/db/schema";
+import { rotatePushEndpoint } from "@/lib/firestore/push-endpoints";
+import { requestJson } from "@/lib/api-helpers";
 import { fail, guarded, ok, str } from "@/lib/api-helpers";
 
 /**
@@ -10,7 +9,7 @@ import { fail, guarded, ok, str } from "@/lib/api-helpers";
  */
 export async function POST(request: Request) {
   return guarded(async () => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const oldEndpoint = str(body.oldEndpoint);
     const sub = (body.subscription ?? null) as
       | { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } }
@@ -23,19 +22,7 @@ export async function POST(request: Request) {
     if (!endpoint || !p256dh || !auth) return fail("Incomplete subscription.", 400);
     if (!oldEndpoint) return fail("Missing previous subscription.", 400);
 
-    const existing = await db
-      .select({ id: pushSubscriptions.id })
-      .from(pushSubscriptions)
-      .where(eq(pushSubscriptions.endpoint, oldEndpoint))
-      .limit(1);
-
-    if (!existing[0]) return ok({ ok: true, matched: false });
-
-    await db
-      .update(pushSubscriptions)
-      .set({ endpoint, p256dh, auth, invalidAt: null, lastSeenAt: new Date() })
-      .where(eq(pushSubscriptions.id, existing[0].id));
-
-    return ok({ ok: true, matched: true });
+    const matched = await rotatePushEndpoint(oldEndpoint, { endpoint, p256dh, auth });
+    return ok({ ok: true, matched });
   });
 }

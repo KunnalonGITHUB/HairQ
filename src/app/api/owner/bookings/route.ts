@@ -1,6 +1,8 @@
-import { and, asc, desc, eq, gte, inArray, lte } from "drizzle-orm";
-import { db } from "@/db";
-import { bookings, customers, services, staff } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { bookingRepository, staffRepository, serviceRepository } from "@/lib/firestore/repositories";
+import { and, asc, desc, eq, gte, inArray, lte } from "@/lib/firestore/query";
+
+import { bookings, customers, services, staff } from "@/lib/firestore/fields";
 import { fail, num, ok, str, validPhone, withOwner } from "@/lib/api-helpers";
 import { newToken } from "@/lib/auth";
 import { dayBookings, getSalonById, pushNotification, upsertCustomer } from "@/lib/salon-data";
@@ -45,22 +47,12 @@ export async function GET(request: Request) {
       base.push(inArray(bookings.status, ["cancelled", "no_show"]));
     }
 
-    const rows = await db
-      .select(selection)
-      .from(bookings)
-      .innerJoin(customers, eq(customers.id, bookings.customerId))
-      .innerJoin(services, eq(services.id, bookings.serviceId))
-      .where(and(...base))
-      .orderBy(scope === "completed" || scope === "cancelled" ? desc(bookings.scheduledAt) : asc(bookings.scheduledAt))
-      .limit(200);
+    const rows = await bookingRepository.find(user.salonId, { select: selection, joins: [{ table: "customers", on: eq(customers.id, bookings.customerId), left: false }, { table: "services", on: eq(services.id, bookings.serviceId), left: false }], where: and(...base), orderBy: [scope === "completed" || scope === "cancelled" ? desc(bookings.scheduledAt) : asc(bookings.scheduledAt)], limit: 200 });
 
-    const team = await db.select().from(staff).where(eq(staff.salonId, user.salonId));
+    const team = await staffRepository.find(user.salonId, { where: eq(staff.salonId, user.salonId) });
     const names = new Map(team.map((t) => [t.id, t.name]));
 
-    const counts = await db
-      .select({ status: bookings.status, scheduledAt: bookings.scheduledAt })
-      .from(bookings)
-      .where(eq(bookings.salonId, user.salonId));
+    const counts = await bookingRepository.find(user.salonId, { select: { status: bookings.status, scheduledAt: bookings.scheduledAt }, where: eq(bookings.salonId, user.salonId) });
 
     return ok({
       bookings: rows.map((r) => ({ ...r, staffName: r.staffId ? names.get(r.staffId) ?? null : null })),
@@ -78,12 +70,12 @@ export async function GET(request: Request) {
         cancelled: counts.filter((c) => ["cancelled", "no_show"].includes(c.status)).length,
       },
     });
-  });
+  }, request);
 }
 
 export async function POST(request: Request) {
   return withOwner(async (user) => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const name = str(body.name);
     const phone = str(body.phone);
     const serviceId = num(body.serviceId);
@@ -101,11 +93,7 @@ export async function POST(request: Request) {
     const salon = await getSalonById(user.salonId);
     if (!salon) return fail("Salon not found", 404);
 
-    const svc = await db
-      .select()
-      .from(services)
-      .where(and(eq(services.id, serviceId), eq(services.salonId, user.salonId)))
-      .limit(1);
+    const svc = await serviceRepository.find(user.salonId, { where: and(eq(services.id, serviceId), eq(services.salonId, user.salonId)), limit: 1 });
     if (!svc[0]) return fail("That service isn't on your menu.");
 
     const existing = await dayBookings(user.salonId, scheduledAt);
@@ -121,9 +109,7 @@ export async function POST(request: Request) {
       preferredStaffId: staffId,
     });
 
-    const [booking] = await db
-      .insert(bookings)
-      .values({
+    const [booking] = await bookingRepository.create(user.salonId, {
         salonId: user.salonId,
         customerId: customer.id,
         serviceId,
@@ -133,8 +119,7 @@ export async function POST(request: Request) {
         durationMin: svc[0].durationMin,
         source: "manual",
         notes: str(body.notes) || null,
-      })
-      .returning();
+      });
 
     await pushNotification({
       salonId: user.salonId,
@@ -151,5 +136,5 @@ export async function POST(request: Request) {
     });
 
     return ok({ booking }, 201);
-  });
+  }, request);
 }

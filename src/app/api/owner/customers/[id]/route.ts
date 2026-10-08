@@ -1,5 +1,8 @@
-import { and, desc, eq, gte, inArray } from "drizzle-orm";
-import { db } from "@/db";
+import { publicSubscription } from "@/lib/firestore/public-dto";
+import { requestJson } from "@/lib/api-helpers";
+import { customerRepository, visitRepository, bookingRepository, queueRepository, pushSubscriptionRepository, staffRepository, serviceRepository, notificationRepository } from "@/lib/firestore/repositories";
+import { and, desc, eq, gte, inArray } from "@/lib/firestore/query";
+
 import {
   bookings,
   customers,
@@ -9,7 +12,7 @@ import {
   services,
   staff,
   visits,
-} from "@/db/schema";
+} from "@/lib/firestore/fields";
 import { fail, num, ok, str, withOwner } from "@/lib/api-helpers";
 
 export async function GET(_request: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -17,17 +20,12 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
     const { id } = await ctx.params;
     const customerId = Number(id);
 
-    const rows = await db
-      .select()
-      .from(customers)
-      .where(and(eq(customers.id, customerId), eq(customers.salonId, user.salonId)))
-      .limit(1);
+    const rows = await customerRepository.find(user.salonId, { where: and(eq(customers.id, customerId), eq(customers.salonId, user.salonId)), limit: 1 });
     const customer = rows[0];
     if (!customer) return fail("We couldn't find that customer.", 404);
 
     const [visitRows, bookingRows, queueRows, sub, team, svc, notes] = await Promise.all([
-      db
-        .select({
+      visitRepository.find(user.salonId, { select: {
           id: visits.id,
           completedAt: visits.completedAt,
           amount: visits.amount,
@@ -36,61 +34,32 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
           source: visits.source,
           serviceId: visits.serviceId,
           staffId: visits.staffId,
-        })
-        .from(visits)
-        .where(eq(visits.customerId, customerId))
-        .orderBy(desc(visits.completedAt))
-        .limit(40),
-      db
-        .select({
+        }, where: eq(visits.customerId, customerId), orderBy: [desc(visits.completedAt)], limit: 40 }),
+      bookingRepository.find(user.salonId, { select: {
           id: bookings.id,
           scheduledAt: bookings.scheduledAt,
           status: bookings.status,
           serviceId: bookings.serviceId,
           staffId: bookings.staffId,
           durationMin: bookings.durationMin,
-        })
-        .from(bookings)
-        .where(
-          and(
+        }, where: and(
             eq(bookings.customerId, customerId),
             gte(bookings.scheduledAt, new Date()),
             inArray(bookings.status, ["confirmed", "arrived"]),
-          ),
-        )
-        .orderBy(bookings.scheduledAt)
-        .limit(5),
-      db
-        .select({ id: queueEntries.id, status: queueEntries.status, token: queueEntries.token })
-        .from(queueEntries)
-        .where(
-          and(
+          ), orderBy: [bookings.scheduledAt], limit: 5 }),
+      queueRepository.find(user.salonId, { select: { id: queueEntries.id, status: queueEntries.status, token: queueEntries.token }, where: and(
             eq(queueEntries.customerId, customerId),
             inArray(queueEntries.status, ["waiting", "serving"]),
-          ),
-        )
-        .limit(1),
-      db
-        .select()
-        .from(pushSubscriptions)
-        .where(eq(pushSubscriptions.customerId, customerId))
-        .limit(1),
-      db.select({ id: staff.id, name: staff.name }).from(staff).where(eq(staff.salonId, user.salonId)),
-      db
-        .select({ id: services.id, name: services.name, price: services.price })
-        .from(services)
-        .where(eq(services.salonId, user.salonId)),
-      db
-        .select({
+          ), limit: 1 }),
+      pushSubscriptionRepository.find(user.salonId, { where: eq(pushSubscriptions.customerId, customerId), limit: 1 }),
+      staffRepository.find(user.salonId, { select: { id: staff.id, name: staff.name }, where: eq(staff.salonId, user.salonId) }),
+      serviceRepository.find(user.salonId, { select: { id: services.id, name: services.name, price: services.price }, where: eq(services.salonId, user.salonId) }),
+      notificationRepository.find(user.salonId, { select: {
           id: notifications.id,
           title: notifications.title,
           type: notifications.type,
           deliveredAt: notifications.deliveredAt,
-        })
-        .from(notifications)
-        .where(eq(notifications.customerId, customerId))
-        .orderBy(desc(notifications.deliveredAt))
-        .limit(10),
+        }, where: eq(notifications.customerId, customerId), orderBy: [desc(notifications.deliveredAt)], limit: 10 }),
     ]);
 
     const staffNames = new Map(team.map((t) => [t.id, t.name]));
@@ -120,7 +89,7 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
         staffName: b.staffId ? staffNames.get(b.staffId) ?? null : null,
       })),
       inQueue: queueRows[0] ?? null,
-      subscription: sub[0] ?? null,
+      subscription: publicSubscription(sub[0]),
       notifications: notes,
       favouriteServices: [...serviceTally.entries()]
         .sort((a, b) => b[1] - a[1])
@@ -129,14 +98,14 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
       staff: team,
       services: svc,
     });
-  });
+  }, _request);
 }
 
 export async function PATCH(request: Request, ctx: { params: Promise<{ id: string }> }) {
   return withOwner(async (user) => {
     const { id } = await ctx.params;
     const customerId = Number(id);
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
 
     const patch: Record<string, unknown> = {};
     if ("name" in body) {
@@ -151,22 +120,16 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
     if ("preferredStaffId" in body) patch.preferredStaffId = num(body.preferredStaffId);
     if (Object.keys(patch).length === 0) return fail("Nothing to update.");
 
-    const [updated] = await db
-      .update(customers)
-      .set(patch)
-      .where(and(eq(customers.id, customerId), eq(customers.salonId, user.salonId)))
-      .returning();
+    const [updated] = await customerRepository.update(user.salonId, and(eq(customers.id, customerId), eq(customers.salonId, user.salonId)), patch);
     if (!updated) return fail("We couldn't find that customer.", 404);
     return ok({ customer: updated });
-  });
+  }, request);
 }
 
 export async function DELETE(_request: Request, ctx: { params: Promise<{ id: string }> }) {
   return withOwner(async (user) => {
     const { id } = await ctx.params;
-    await db
-      .delete(customers)
-      .where(and(eq(customers.id, Number(id)), eq(customers.salonId, user.salonId)));
+    await customerRepository.remove(user.salonId, and(eq(customers.id, Number(id)), eq(customers.salonId, user.salonId)));
     return ok({ ok: true });
-  });
+  }, _request);
 }

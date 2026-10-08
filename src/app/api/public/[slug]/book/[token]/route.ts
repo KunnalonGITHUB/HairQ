@@ -1,6 +1,7 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { bookings, customers, services, staff } from "@/db/schema";
+import { bookingRepository, staffRepository } from "@/lib/firestore/repositories";
+import { and, eq } from "@/lib/firestore/query";
+
+import { bookings, customers, services, staff } from "@/lib/firestore/fields";
 import { fail, guarded, ok } from "@/lib/api-helpers";
 import { getSalonBySlug } from "@/lib/salon-data";
 
@@ -10,8 +11,7 @@ export async function GET(_request: Request, ctx: { params: Promise<{ slug: stri
     const salon = await getSalonBySlug(slug);
     if (!salon) return fail("We couldn't find that salon link.", 404);
 
-    const rows = await db
-      .select({
+    const rows = await bookingRepository.find(salon.id, { select: {
         id: bookings.id,
         token: bookings.token,
         scheduledAt: bookings.scheduledAt,
@@ -24,19 +24,14 @@ export async function GET(_request: Request, ctx: { params: Promise<{ slug: stri
         customerId: customers.id,
         customerPhone: customers.phone,
         staffId: bookings.staffId,
-      })
-      .from(bookings)
-      .innerJoin(services, eq(services.id, bookings.serviceId))
-      .innerJoin(customers, eq(customers.id, bookings.customerId))
-      .where(and(eq(bookings.salonId, salon.id), eq(bookings.token, token)))
-      .limit(1);
+      }, joins: [{ table: "services", on: eq(services.id, bookings.serviceId), left: false }, { table: "customers", on: eq(customers.id, bookings.customerId), left: false }], where: and(eq(bookings.salonId, salon.id), eq(bookings.token, token)), limit: 1 });
 
     const booking = rows[0];
     if (!booking) return fail("We couldn't find that appointment.", 404);
 
     let staffName: string | null = null;
     if (booking.staffId) {
-      const s = await db.select({ name: staff.name }).from(staff).where(eq(staff.id, booking.staffId)).limit(1);
+      const s = await staffRepository.find(salon.id, { select: { name: staff.name }, where: eq(staff.id, booking.staffId), limit: 1 });
       staffName = s[0]?.name ?? null;
     }
 
@@ -62,16 +57,12 @@ export async function DELETE(_request: Request, ctx: { params: Promise<{ slug: s
     const salon = await getSalonBySlug(slug);
     if (!salon) return fail("We couldn't find that salon link.", 404);
 
-    const rows = await db
-      .select()
-      .from(bookings)
-      .where(and(eq(bookings.salonId, salon.id), eq(bookings.token, token)))
-      .limit(1);
+    const rows = await bookingRepository.find(salon.id, { where: and(eq(bookings.salonId, salon.id), eq(bookings.token, token)), limit: 1 });
     const booking = rows[0];
     if (!booking) return fail("We couldn't find that appointment.", 404);
     if (booking.status === "completed") return fail("That appointment is already complete.");
 
-    await db.update(bookings).set({ status: "cancelled" }).where(eq(bookings.id, booking.id));
+    await bookingRepository.update(salon.id, eq(bookings.id, booking.id), { status: "cancelled" });
     return ok({ ok: true });
   });
 }

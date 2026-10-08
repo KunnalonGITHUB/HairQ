@@ -1,0 +1,14 @@
+import { fields } from "./query";
+export const salons = fields("salons");
+export const workingHours = fields("workingHours");
+export const services = fields("services");
+export const staff = fields("staff");
+export const staffServices = fields("staffServices");
+export const customers = fields("customers");
+export const pushSubscriptions = fields("pushSubscriptions");
+export const queueEntries = fields("queueEntries");
+export const bookings = fields("bookings");
+export const visits = fields("visits");
+export const offers = fields("offers");
+export const campaigns = fields("campaigns");
+export const notifications = fields("notifications");

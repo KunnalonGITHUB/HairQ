@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { redirect } from "next/navigation";
 import { OwnerShell } from "@/components/owner/shell";
-import { getSessionUser } from "@/lib/auth";
+import { getPageSessionUser as getSessionUser } from "@/lib/auth";
 
 export const metadata = { title: "HairQ Owner Console" };
 

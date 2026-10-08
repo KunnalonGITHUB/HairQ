@@ -1,8 +1,9 @@
+import { serviceRepository, staffRepository } from "@/lib/firestore/repositories";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { services as servicesTable, staff as staffTable } from "@/db/schema";
+import { and, eq } from "@/lib/firestore/query";
+
+import { services as servicesTable, staff as staffTable } from "@/lib/firestore/fields";
 import { IconClock, IconMapPin, IconPhone, IconScissors } from "@/components/icons";
 import {
   brandVars,
@@ -44,15 +45,8 @@ export default async function SalonWebsite({ params }: { params: Promise<{ slug:
   const [hours, live, services, team, offers] = await Promise.all([
     getHours(salon.id),
     loadLiveQueue(salon.id),
-    db
-      .select()
-      .from(servicesTable)
-      .where(and(eq(servicesTable.salonId, salon.id), eq(servicesTable.active, true)))
-      .orderBy(servicesTable.sortOrder),
-    db
-      .select()
-      .from(staffTable)
-      .where(and(eq(staffTable.salonId, salon.id), eq(staffTable.active, true))),
+    serviceRepository.find(salon.id, { where: and(eq(servicesTable.salonId, salon.id), eq(servicesTable.active, true)), orderBy: [servicesTable.sortOrder] }),
+    staffRepository.find(salon.id, { where: and(eq(staffTable.salonId, salon.id), eq(staffTable.active, true)) }),
     getActiveOffers(salon.id),
   ]);
 

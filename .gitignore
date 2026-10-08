@@ -4,6 +4,15 @@
 .env*
 !.env.example
 
+# Firebase credentials and private-key material (never commit these)
+*service-account*.json
+*serviceAccount*.json
+*service_account*.json
+*-firebase-adminsdk-*.json
+*firebase-adminsdk*.json
+*.pem
+*.key
+
 # Dependencies and generated output
 node_modules/
 .next/
@@ -17,6 +26,7 @@ next-env.d.ts
 # Local tooling and logs
 .vercel/
 .codex/
+.verification-tools/
 *.log
 .DS_Store
 Thumbs.db

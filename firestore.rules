@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // HairQ uses server repositories. Admin bypasses these rules; API code
+    // verifies Firebase session cookies and enforces an immutable salon scope.
+    // The browser uses Firebase Auth, but no direct client Firestore access.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,9 +1,12 @@
+import "server-only";
+import { pushSubscriptionRepository } from "@/lib/firestore/repositories";
 import fs from "node:fs";
 import path from "node:path";
 import webpush, { type PushSubscription as WebPushSubscription } from "web-push";
-import { eq, inArray } from "drizzle-orm";
-import { db } from "@/db";
-import { pushSubscriptions } from "@/db/schema";
+import { eq, inArray } from "@/lib/firestore/query";
+
+import { pushSubscriptions } from "@/lib/firestore/fields";
+import { afterCommit, inTransaction } from "./firestore/store";
 
 /**
  * Real Web Push delivery.
@@ -46,6 +49,10 @@ function resolveKeys(): { publicKey: string; privateKey: string } | null {
     keys = { publicKey: envPublic, privateKey: envPrivate };
     return keys;
   }
+
+  // Serverless deployments cannot safely persist or share generated keypairs.
+  // Missing production keys disable transport while keeping the in-app feed.
+  if (process.env.NODE_ENV === "production") return null;
 
   try {
     if (fs.existsSync(KEYFILE)) {
@@ -114,11 +121,8 @@ function toWebPushSubscription(row: SubRow): WebPushSubscription | null {
   };
 }
 
-async function markInvalid(id: number) {
-  await db
-    .update(pushSubscriptions)
-    .set({ invalidAt: new Date(), endpoint: null, p256dh: null, auth: null })
-    .where(eq(pushSubscriptions.id, id));
+async function markInvalid(salonId: number, id: number) {
+  await pushSubscriptionRepository.update(salonId, eq(pushSubscriptions.id, id), { invalidAt: new Date(), endpoint: null, p256dh: null, auth: null });
 }
 
 /**
@@ -126,25 +130,32 @@ async function markInvalid(id: number) {
  * Dead endpoints (404/410) are cleared so the client re-subscribes next visit.
  */
 export async function sendPushToCustomers(
+  salonId: number,
   customerIds: number[],
   payload: PushPayload,
 ): Promise<{ sent: number; failed: number; skipped: number }> {
   const result = { sent: 0, failed: 0, skipped: 0 };
+  if (inTransaction()) {
+    await afterCommit(() => sendPushToCustomers(salonId, customerIds, payload));
+    return result;
+  }
   if (customerIds.length === 0) return result;
   if (!pushConfigured()) {
     // Not an error for the operator: the in-app feed still works.
     return { ...result, skipped: customerIds.length };
   }
 
-  const rows = await db
-    .select({
+  const rows = await pushSubscriptionRepository.find(salonId, { select: {
       id: pushSubscriptions.id,
       endpoint: pushSubscriptions.endpoint,
       p256dh: pushSubscriptions.p256dh,
       auth: pushSubscriptions.auth,
-    })
-    .from(pushSubscriptions)
-    .where(inArray(pushSubscriptions.customerId, customerIds));
+      invalidAt: pushSubscriptions.invalidAt,
+      permission: pushSubscriptions.permission,
+      queueOptIn: pushSubscriptions.queueOptIn,
+      bookingOptIn: pushSubscriptions.bookingOptIn,
+      marketingOptIn: pushSubscriptions.marketingOptIn,
+    }, where: inArray(pushSubscriptions.customerId, customerIds) });
 
   const body = JSON.stringify({
     title: payload.title,
@@ -160,6 +171,11 @@ export async function sendPushToCustomers(
   });
 
   const jobs = rows.map(async (row) => {
+    const optedIn = payload.type === "marketing" ? row.marketingOptIn : payload.type === "booking" ? row.bookingOptIn : row.queueOptIn;
+    if (!optedIn || row.permission !== "granted" || row.invalidAt) {
+      result.skipped += 1;
+      return;
+    }
     const sub = toWebPushSubscription(row);
     if (!sub) {
       result.skipped += 1;
@@ -171,16 +187,13 @@ export async function sendPushToCustomers(
         urgency: payload.type === "marketing" ? "normal" : "high",
       });
       result.sent += 1;
-      await db
-        .update(pushSubscriptions)
-        .set({ lastPushAt: new Date(), invalidAt: null })
-        .where(eq(pushSubscriptions.id, row.id));
+      await pushSubscriptionRepository.update(salonId, eq(pushSubscriptions.id, row.id), { lastPushAt: new Date(), invalidAt: null });
     } catch (err) {
       const status = (err as { statusCode?: number }).statusCode;
       if (status === 404 || status === 410) {
-        await markInvalid(row.id);
+        await markInvalid(salonId, row.id);
       } else {
-        console.error("[hairq:push] delivery failed", status, (err as Error).message);
+        console.error("[hairq:push] delivery failed", status);
       }
       result.failed += 1;
     }

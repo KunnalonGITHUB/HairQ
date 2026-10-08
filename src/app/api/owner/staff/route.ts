@@ -1,24 +1,17 @@
-import { and, eq, inArray } from "drizzle-orm";
-import { db } from "@/db";
-import { queueEntries, services, staff, staffServices } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { staffRepository, serviceRepository, staffServiceRepository, queueRepository } from "@/lib/firestore/repositories";
+import { and, eq, inArray } from "@/lib/firestore/query";
+
+import { queueEntries, services, staff, staffServices } from "@/lib/firestore/fields";
 import { bool, fail, ok, str, withOwner } from "@/lib/api-helpers";
 
-export async function GET() {
+export async function GET(request: Request) {
   return withOwner(async (user) => {
     const [team, svc, links, busy] = await Promise.all([
-      db.select().from(staff).where(eq(staff.salonId, user.salonId)).orderBy(staff.id),
-      db
-        .select({ id: services.id, name: services.name, durationMin: services.durationMin })
-        .from(services)
-        .where(eq(services.salonId, user.salonId))
-        .orderBy(services.sortOrder),
-      db.select().from(staffServices).where(eq(staffServices.salonId, user.salonId)),
-      db
-        .select({ staffId: queueEntries.staffId, status: queueEntries.status })
-        .from(queueEntries)
-        .where(
-          and(eq(queueEntries.salonId, user.salonId), inArray(queueEntries.status, ["waiting", "serving"])),
-        ),
+      staffRepository.find(user.salonId, { where: eq(staff.salonId, user.salonId), orderBy: [staff.id] }),
+      serviceRepository.find(user.salonId, { select: { id: services.id, name: services.name, durationMin: services.durationMin }, where: eq(services.salonId, user.salonId), orderBy: [services.sortOrder] }),
+      staffServiceRepository.find(user.salonId, { where: eq(staffServices.salonId, user.salonId) }),
+      queueRepository.find(user.salonId, { select: { staffId: queueEntries.staffId, status: queueEntries.status }, where: and(eq(queueEntries.salonId, user.salonId), inArray(queueEntries.status, ["waiting", "serving"])) }),
     ]);
 
     return ok({
@@ -30,18 +23,16 @@ export async function GET() {
       })),
       services: svc,
     });
-  });
+  }, request);
 }
 
 export async function POST(request: Request) {
   return withOwner(async (user) => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const name = str(body.name);
     if (!name) return fail("Add the team member's name.");
 
-    const [created] = await db
-      .insert(staff)
-      .values({
+    const [created] = await staffRepository.create(user.salonId, {
         salonId: user.salonId,
         name,
         role: str(body.role) || "Barber",
@@ -51,17 +42,14 @@ export async function POST(request: Request) {
         onShift: bool(body.onShift, true),
         shiftStart: str(body.shiftStart) || "10:00",
         shiftEnd: str(body.shiftEnd) || "21:00",
-      })
-      .returning();
+      });
 
     const serviceIds = Array.isArray(body.serviceIds)
       ? (body.serviceIds as unknown[]).map(Number).filter(Boolean)
       : [];
     if (serviceIds.length > 0) {
-      await db
-        .insert(staffServices)
-        .values(serviceIds.map((serviceId) => ({ salonId: user.salonId, staffId: created.id, serviceId })));
+      await staffServiceRepository.create(user.salonId, serviceIds.map((serviceId) => ({ salonId: user.salonId, staffId: created.id, serviceId })));
     }
     return ok({ staff: created }, 201);
-  });
+  }, request);
 }

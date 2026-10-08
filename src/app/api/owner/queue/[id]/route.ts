@@ -1,6 +1,8 @@
-import { and, eq, inArray } from "drizzle-orm";
-import { db } from "@/db";
-import { queueEntries, services } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { queueRepository, serviceRepository } from "@/lib/firestore/repositories";
+import { and, eq, inArray } from "@/lib/firestore/query";
+
+import { queueEntries, services } from "@/lib/firestore/fields";
 import { fail, num, ok, str, withOwner } from "@/lib/api-helpers";
 import { getSalonById, pushNotification } from "@/lib/salon-data";
 import { recordCompletion, resequence, syncQueueNotifications } from "@/lib/queue-actions";
@@ -9,14 +11,10 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
   return withOwner(async (user) => {
     const { id } = await ctx.params;
     const entryId = Number(id);
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const action = str(body.action);
 
-    const rows = await db
-      .select()
-      .from(queueEntries)
-      .where(and(eq(queueEntries.id, entryId), eq(queueEntries.salonId, user.salonId)))
-      .limit(1);
+    const rows = await queueRepository.find(user.salonId, { where: and(eq(queueEntries.id, entryId), eq(queueEntries.salonId, user.salonId)), limit: 1 });
     const entry = rows[0];
     if (!entry) return fail("That queue entry no longer exists.", 404);
 
@@ -28,74 +26,49 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
         if (entry.status === "serving") return fail("That service has already started.");
         const chair = str(body.chair) || null;
         const staffId = num(body.staffId) ?? entry.staffId;
-        await db
-          .update(queueEntries)
-          .set({ status: "serving", startedAt: new Date(), chair, staffId })
-          .where(eq(queueEntries.id, entryId));
+        await queueRepository.update(user.salonId, eq(queueEntries.id, entryId), { status: "serving", startedAt: new Date(), chair, staffId });
         break;
       }
       case "complete": {
+        if (entry.status === "completed") return ok({ ok: true });
+        if (!["waiting", "serving"].includes(entry.status)) return fail("That queue entry has already ended.", 409);
         if (entry.status !== "serving") {
-          await db
-            .update(queueEntries)
-            .set({ status: "serving", startedAt: entry.startedAt ?? new Date() })
-            .where(eq(queueEntries.id, entryId));
+          await queueRepository.update(user.salonId, eq(queueEntries.id, entryId), { status: "serving", startedAt: entry.startedAt ?? new Date() });
         }
-        await recordCompletion(entryId);
+        await recordCompletion(user.salonId, entryId);
         await resequence(user.salonId);
         break;
       }
+      case "no_show":
       case "skip": {
-        await db
-          .update(queueEntries)
-          .set({ status: "skipped", completedAt: new Date() })
-          .where(eq(queueEntries.id, entryId));
+        await queueRepository.update(user.salonId, eq(queueEntries.id, entryId), { status: action === "no_show" ? "no_show" : "skipped", completedAt: new Date() });
         await resequence(user.salonId);
         break;
       }
       case "cancel": {
-        await db
-          .update(queueEntries)
-          .set({ status: "cancelled", completedAt: new Date() })
-          .where(eq(queueEntries.id, entryId));
+        await queueRepository.update(user.salonId, eq(queueEntries.id, entryId), { status: "cancelled", completedAt: new Date() });
         await resequence(user.salonId);
         break;
       }
       case "move": {
         const dir = str(body.direction) === "up" ? -1 : 1;
-        const siblings = await db
-          .select({ id: queueEntries.id, position: queueEntries.position })
-          .from(queueEntries)
-          .where(
-            and(
+        const siblings = await queueRepository.find(user.salonId, { select: { id: queueEntries.id, position: queueEntries.position }, where: and(
               eq(queueEntries.salonId, user.salonId),
               inArray(queueEntries.status, ["waiting"]),
-            ),
-          )
-          .orderBy(queueEntries.position, queueEntries.id);
+            ), orderBy: [queueEntries.position, queueEntries.id] });
         const index = siblings.findIndex((s) => s.id === entryId);
         const target = siblings[index + dir];
         if (index === -1 || !target) return fail("They're already at the end of the line.");
         const current = siblings[index];
-        await db
-          .update(queueEntries)
-          .set({ position: target.position })
-          .where(eq(queueEntries.id, current.id));
-        await db
-          .update(queueEntries)
-          .set({ position: current.position })
-          .where(eq(queueEntries.id, target.id));
+        await queueRepository.update(user.salonId, eq(queueEntries.id, current.id), { position: target.position });
+        await queueRepository.update(user.salonId, eq(queueEntries.id, target.id), { position: current.position });
         break;
       }
       case "update": {
         const patch: Record<string, unknown> = {};
         const serviceId = num(body.serviceId);
         if (serviceId && serviceId !== entry.serviceId) {
-          const svc = await db
-            .select()
-            .from(services)
-            .where(and(eq(services.id, serviceId), eq(services.salonId, user.salonId)))
-            .limit(1);
+          const svc = await serviceRepository.find(user.salonId, { where: and(eq(services.id, serviceId), eq(services.salonId, user.salonId)), limit: 1 });
           if (!svc[0]) return fail("That service isn't available.");
           patch.serviceId = serviceId;
           patch.durationMin = svc[0].durationMin;
@@ -104,7 +77,7 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
         if ("notes" in body) patch.notes = str(body.notes) || null;
         if ("chair" in body) patch.chair = str(body.chair) || null;
         if (Object.keys(patch).length === 0) return fail("Nothing to update.");
-        await db.update(queueEntries).set(patch).where(eq(queueEntries.id, entryId));
+        await queueRepository.update(user.salonId, eq(queueEntries.id, entryId), patch);
         break;
       }
       case "notify": {
@@ -124,5 +97,5 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
 
     await syncQueueNotifications(user.salonId, salon.name, salon.slug);
     return ok({ ok: true });
-  });
+  }, request);
 }

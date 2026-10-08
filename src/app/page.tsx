@@ -1,7 +1,8 @@
+import { salonRepository } from "@/lib/firestore/repositories";
 import Link from "next/link";
-import { desc } from "drizzle-orm";
-import { db } from "@/db";
-import { salons } from "@/db/schema";
+import { desc } from "@/lib/firestore/query";
+
+import { salons } from "@/lib/firestore/fields";
 import { IconCheck, IconScissors } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
@@ -36,7 +37,7 @@ const FEATURES = [
 ];
 
 export default async function LandingPage() {
-  const rows = await db.select({ slug: salons.slug, name: salons.name }).from(salons).orderBy(desc(salons.id)).limit(1);
+  const rows = await salonRepository.find(null, { select: { slug: salons.slug, name: salons.name }, orderBy: [desc(salons.id)], limit: 1 });
   const demo = rows[0];
 
   return (

@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { offers, owners, salons, services, staff, staffServices, workingHours } from "@/db/schema";
-import { hashPassword } from "./auth";
+import { salonRepository, workingHoursRepository, serviceRepository, staffRepository, staffServiceRepository, offerRepository } from "./firestore/repositories";
+import { salons as salonFields } from "./firestore/fields";
+import { eq as firestoreEq } from "./firestore/query";
+import { provisionOwnerWorkspace } from "./firestore/store";
 import { slugify } from "./api-helpers";
 
 const STARTER_SERVICES = [
@@ -19,7 +19,7 @@ export async function uniqueSlug(base: string): Promise<string> {
   let n = 1;
   // Small loop — slugs collide rarely.
   while (true) {
-    const existing = await db.select({ id: salons.id }).from(salons).where(eq(salons.slug, candidate)).limit(1);
+    const existing = await salonRepository.find(null, { where: firestoreEq(salonFields.slug, candidate), limit: 1 });
     if (existing.length === 0) return candidate;
     n += 1;
     candidate = `${root}-${n}`;
@@ -30,40 +30,19 @@ export async function createSalonWorkspace(input: {
   salonName: string;
   ownerName: string;
   email: string;
-  password: string;
+  uid: string;
   phone?: string;
   city?: string;
 }) {
   const slug = await uniqueSlug(input.salonName);
 
-  const [salon] = await db
-    .insert(salons)
-    .values({
-      slug,
-      name: input.salonName,
-      tagline: "Walk in without the wait.",
-      about: `${input.salonName} runs a live digital queue so you always know when it's your turn.`,
-      phone: input.phone ?? null,
-      whatsapp: input.phone ?? null,
-      email: input.email,
-      address: input.city ?? null,
-      pwaName: input.salonName,
-      pwaShortName: input.salonName.split(" ")[0]?.slice(0, 12) ?? input.salonName.slice(0, 12),
-      pwaThemeColor: "#BC5A2E",
-    })
-    .returning();
-
-  const [owner] = await db
-    .insert(owners)
-    .values({
-      salonId: salon.id,
-      name: input.ownerName,
-      email: input.email.toLowerCase(),
-      passwordHash: hashPassword(input.password),
-    })
-    .returning();
-
-  await db.insert(workingHours).values(
+  return provisionOwnerWorkspace({uid:input.uid,email:input.email,name:input.ownerName}, {
+      slug, name:input.salonName, tagline:"Walk in without the wait.",
+      about:input.salonName+" runs a live digital queue so you always know when it's your turn.",
+      phone:input.phone??null,whatsapp:input.phone??null,email:input.email,address:input.city??null,
+      pwaName:input.salonName,pwaShortName:input.salonName.split(" ")[0].slice(0,12),pwaThemeColor:"#BC5A2E",
+  }, async (salon) => {
+  await workingHoursRepository.create(salon.id,
     Array.from({ length: 7 }, (_, day) => ({
       salonId: salon.id,
       dayOfWeek: day,
@@ -73,9 +52,7 @@ export async function createSalonWorkspace(input: {
     })),
   );
 
-  const createdServices = await db
-    .insert(services)
-    .values(
+  const createdServices = await serviceRepository.create(salon.id,
       STARTER_SERVICES.map((s, i) => ({
         salonId: salon.id,
         name: s.name,
@@ -85,18 +62,14 @@ export async function createSalonWorkspace(input: {
         durationMin: s.durationMin,
         sortOrder: i,
       })),
-    )
-    .returning();
+    );
 
-  const createdStaff = await db
-    .insert(staff)
-    .values([
+  const createdStaff = await staffRepository.create(salon.id,[
       { salonId: salon.id, name: input.ownerName, role: "Owner · Senior stylist" },
       { salonId: salon.id, name: "Chair 2", role: "Barber" },
-    ])
-    .returning();
+    ]);
 
-  await db.insert(staffServices).values(
+  await staffServiceRepository.create(salon.id,
     createdStaff.flatMap((member) =>
       createdServices.map((svc) => ({
         salonId: salon.id,
@@ -106,12 +79,13 @@ export async function createSalonWorkspace(input: {
     ),
   );
 
-  await db.insert(offers).values({
+  await offerRepository.create(salon.id, {
     salonId: salon.id,
     title: "First visit — 15% off",
     description: "Show this on your first booking through our app.",
     badge: "New here",
   });
 
-  return { salon, owner };
+  });
+
 }

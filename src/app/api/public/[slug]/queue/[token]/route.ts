@@ -1,6 +1,8 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { queueEntries, services } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { queueRepository, serviceRepository } from "@/lib/firestore/repositories";
+import { and, eq } from "@/lib/firestore/query";
+
+import { queueEntries, services } from "@/lib/firestore/fields";
 import { fail, guarded, num, ok, str } from "@/lib/api-helpers";
 import { getSalonBySlug, loadLiveQueue } from "@/lib/salon-data";
 import { queueStage } from "@/lib/queue-engine";
@@ -9,17 +11,13 @@ import { clockLabel, humanDuration, waitBand } from "@/lib/time";
 
 type EntryState =
   | { kind: "error"; message: string; status: number }
-  | { kind: "ok"; salon: NonNullable<Awaited<ReturnType<typeof getSalonBySlug>>>; row: typeof queueEntries.$inferSelect };
+  | { kind: "ok"; salon: NonNullable<Awaited<ReturnType<typeof getSalonBySlug>>>; row: import("@/lib/firestore/entities").QueueEntry };
 
 async function entryState(slug: string, token: string): Promise<EntryState> {
   const salon = await getSalonBySlug(slug);
   if (!salon) return { kind: "error", message: "We couldn't find that salon link.", status: 404 };
 
-  const rows = await db
-    .select()
-    .from(queueEntries)
-    .where(and(eq(queueEntries.salonId, salon.id), eq(queueEntries.token, token)))
-    .limit(1);
+  const rows = await queueRepository.find(salon.id, { where: and(eq(queueEntries.salonId, salon.id), eq(queueEntries.token, token)), limit: 1 });
   const row = rows[0];
   if (!row) return { kind: "error", message: "That queue ticket is no longer active.", status: 404 };
   return { kind: "ok", salon, row };
@@ -36,11 +34,7 @@ export async function GET(_request: Request, ctx: { params: Promise<{ slug: stri
     const entry = live.entries.find((e) => e.id === row.id);
 
     if (!entry) {
-      const svc = await db
-        .select({ name: services.name })
-        .from(services)
-        .where(eq(services.id, row.serviceId))
-        .limit(1);
+      const svc = await serviceRepository.find(salon.id, { select: { name: services.name }, where: eq(services.id, row.serviceId), limit: 1 });
       return ok({
         active: false,
         status: row.status,
@@ -107,21 +101,14 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ slug: str
       return fail("This salon asks customers to change services at the counter.", 403);
     }
 
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const serviceId = num(body.serviceId);
     if (!serviceId) return fail("Choose a service.");
 
-    const svc = await db
-      .select()
-      .from(services)
-      .where(and(eq(services.id, serviceId), eq(services.salonId, salon.id), eq(services.active, true)))
-      .limit(1);
+    const svc = await serviceRepository.find(salon.id, { where: and(eq(services.id, serviceId), eq(services.salonId, salon.id), eq(services.active, true)), limit: 1 });
     if (!svc[0]) return fail("That service isn't available right now.");
 
-    await db
-      .update(queueEntries)
-      .set({ serviceId, durationMin: svc[0].durationMin, staffId: num(body.staffId) ?? row.staffId })
-      .where(eq(queueEntries.id, row.id));
+    await queueRepository.update(salon.id, eq(queueEntries.id, row.id), { serviceId, durationMin: svc[0].durationMin, staffId: num(body.staffId) ?? row.staffId });
 
     await syncQueueNotifications(salon.id, salon.name, salon.slug);
     return ok({ ok: true });
@@ -138,10 +125,7 @@ export async function DELETE(_request: Request, ctx: { params: Promise<{ slug: s
     if (row.status === "serving") {
       return fail("You're already in the chair — please talk to the salon.", 409);
     }
-    await db
-      .update(queueEntries)
-      .set({ status: "cancelled", completedAt: new Date() })
-      .where(eq(queueEntries.id, row.id));
+    await queueRepository.update(salon.id, eq(queueEntries.id, row.id), { status: "cancelled", completedAt: new Date() });
     await resequence(salon.id);
     await syncQueueNotifications(salon.id, salon.name, salon.slug);
     return ok({ ok: true });

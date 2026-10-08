@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { IconCheck, IconX } from "./icons";
+import { authRequestHeaders } from "@/lib/auth-client";
 
 export function cx(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ");
@@ -325,7 +326,7 @@ export async function api<T = unknown>(
 ): Promise<T> {
   const res = await fetch(url, {
     method: options?.method ?? "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: (url.startsWith("/api/owner/") || url === "/api/auth") && !["GET", "HEAD"].includes(options?.method ?? "POST") ? await authRequestHeaders() : { "Content-Type": "application/json" },
     body: options?.body ? JSON.stringify(options.body) : undefined,
   });
   const json = await res.json().catch(() => ({}));

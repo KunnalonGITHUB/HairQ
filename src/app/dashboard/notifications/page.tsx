@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import { NotificationsComposer } from "@/components/owner/engagement";
-import { getSessionUser } from "@/lib/auth";
+import { getPageSessionUser as getSessionUser } from "@/lib/auth";
 import { getSalonById } from "@/lib/salon-data";
 
 export const metadata = { title: "Notifications · HairQ" };

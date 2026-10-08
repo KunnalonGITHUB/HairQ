@@ -2,29 +2,37 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { IconScissors } from "@/components/icons";
-import { api, Labeled, Spinner } from "@/components/ui";
+import { Labeled, Spinner } from "@/components/ui";
+import { authenticateHairQ } from "@/lib/auth-client";
+
+const subscribeHydration = () => () => {};
+const clientHydrated = () => true;
+const serverHydrated = () => false;
 
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const router = useRouter();
+  const hydrated = useSyncExternalStore(subscribeHydration, clientHydrated, serverHydrated);
   const [form, setForm] = useState({
     salonName: "",
     ownerName: "",
     email: "",
-    password: "",
     phone: "",
     city: "",
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const submit = async (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    const passwordInput = e.currentTarget.elements.namedItem("password") as HTMLInputElement;
+    const password = passwordInput.value;
+    passwordInput.value = "";
     setBusy(true);
     setError(null);
     try {
-      await api("/api/auth", { body: { action: mode, ...form } });
+      await authenticateHairQ(mode, form.email, password, form);
       router.push("/dashboard");
       router.refresh();
     } catch (err) {
@@ -89,34 +97,35 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
               : "Two minutes. We'll create your services, staff and customer link for you."}
           </p>
 
-          <form onSubmit={submit} className="mt-6 space-y-3">
+          <form onSubmit={submit} method="post" action="/api/auth" className="mt-6 space-y-3">
             {mode === "signup" ? (
               <>
                 <Labeled label="Salon name">
-                  <input className="field" value={form.salonName} onChange={set("salonName")} placeholder="ABC Salon" required />
+                  <input disabled={!hydrated} className="field" value={form.salonName} onChange={set("salonName")} placeholder="ABC Salon" required />
                 </Labeled>
                 <Labeled label="Your name">
-                  <input className="field" value={form.ownerName} onChange={set("ownerName")} required />
+                  <input disabled={!hydrated} className="field" value={form.ownerName} onChange={set("ownerName")} required />
                 </Labeled>
                 <div className="grid grid-cols-2 gap-3">
                   <Labeled label="Phone">
-                    <input className="field" value={form.phone} onChange={set("phone")} inputMode="tel" />
+                    <input disabled={!hydrated} className="field" value={form.phone} onChange={set("phone")} inputMode="tel" />
                   </Labeled>
                   <Labeled label="City">
-                    <input className="field" value={form.city} onChange={set("city")} />
+                    <input disabled={!hydrated} className="field" value={form.city} onChange={set("city")} />
                   </Labeled>
                 </div>
               </>
             ) : null}
             <Labeled label="Email">
-              <input className="field" type="email" value={form.email} onChange={set("email")} required autoComplete="email" />
+              <input disabled={!hydrated} className="field" type="email" value={form.email} onChange={set("email")} required autoComplete="email" />
             </Labeled>
             <Labeled label="Password" hint={mode === "signup" ? "At least 8 characters." : undefined}>
               <input
                 className="field"
                 type="password"
-                value={form.password}
-                onChange={set("password")}
+                disabled={!hydrated}
+                name="password"
+                minLength={mode === "signup" ? 8 : undefined}
                 required
                 autoComplete={mode === "login" ? "current-password" : "new-password"}
               />
@@ -128,7 +137,7 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
               </p>
             ) : null}
 
-            <button className="btn btn-primary btn-lg w-full" disabled={busy}>
+            <button className="btn btn-primary btn-lg w-full" disabled={busy || !hydrated}>
               {busy ? <Spinner /> : null}
               {mode === "login" ? "Sign in" : "Create my salon workspace"}
             </button>

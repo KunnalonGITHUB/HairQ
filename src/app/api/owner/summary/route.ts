@@ -1,6 +1,7 @@
-import { and, asc, eq, gte, inArray, lte } from "drizzle-orm";
-import { db } from "@/db";
-import { bookings, customers, services, staff, visits } from "@/db/schema";
+import { visitRepository, bookingRepository, customerRepository, serviceRepository, staffRepository } from "@/lib/firestore/repositories";
+import { and, asc, eq, gte, inArray, lte } from "@/lib/firestore/query";
+
+import { bookings, customers, services, staff, visits } from "@/lib/firestore/fields";
 import { fail, ok, withOwner } from "@/lib/api-helpers";
 import { getSalonById, loadLiveQueue } from "@/lib/salon-data";
 import { addDays, dateKey, endOfDay, startOfDay } from "@/lib/time";
@@ -17,55 +18,34 @@ export async function GET(request: Request) {
 
     const [live, rangeVisits, todayBookings, upcoming, allCustomers, svc, team] = await Promise.all([
       loadLiveQueue(user.salonId, now),
-      db
-        .select()
-        .from(visits)
-        .where(and(eq(visits.salonId, user.salonId), gte(visits.completedAt, rangeStart)))
-        .orderBy(asc(visits.completedAt)),
-      db
-        .select({
+      visitRepository.find(user.salonId, { where: and(eq(visits.salonId, user.salonId), gte(visits.completedAt, rangeStart)), orderBy: [asc(visits.completedAt)] }),
+      bookingRepository.find(user.salonId, { select: {
           id: bookings.id,
           scheduledAt: bookings.scheduledAt,
           status: bookings.status,
           serviceId: bookings.serviceId,
           staffId: bookings.staffId,
           customerId: bookings.customerId,
-        })
-        .from(bookings)
-        .where(
-          and(
+        }, where: and(
             eq(bookings.salonId, user.salonId),
             gte(bookings.scheduledAt, startOfDay(now)),
             lte(bookings.scheduledAt, endOfDay(now)),
             inArray(bookings.status, ["confirmed", "arrived"]),
-          ),
-        )
-        .orderBy(asc(bookings.scheduledAt)),
-      db
-        .select({ id: bookings.id })
-        .from(bookings)
-        .where(
-          and(
+          ), orderBy: [asc(bookings.scheduledAt)] }),
+      bookingRepository.find(user.salonId, { select: { id: bookings.id }, where: and(
             eq(bookings.salonId, user.salonId),
             gte(bookings.scheduledAt, now),
             inArray(bookings.status, ["confirmed", "arrived"]),
-          ),
-        ),
-      db
-        .select({
+          ) }),
+      customerRepository.find(user.salonId, { select: {
           id: customers.id,
           name: customers.name,
           totalVisits: customers.totalVisits,
           createdAt: customers.createdAt,
           lastVisitAt: customers.lastVisitAt,
-        })
-        .from(customers)
-        .where(eq(customers.salonId, user.salonId)),
-      db
-        .select({ id: services.id, name: services.name, price: services.price })
-        .from(services)
-        .where(eq(services.salonId, user.salonId)),
-      db.select({ id: staff.id, name: staff.name }).from(staff).where(eq(staff.salonId, user.salonId)),
+        }, where: eq(customers.salonId, user.salonId) }),
+      serviceRepository.find(user.salonId, { select: { id: services.id, name: services.name, price: services.price }, where: eq(services.salonId, user.salonId) }),
+      staffRepository.find(user.salonId, { select: { id: staff.id, name: staff.name }, where: eq(staff.salonId, user.salonId) }),
     ]);
 
     const serviceNames = new Map(svc.map((s) => [s.id, s.name]));
@@ -189,5 +169,5 @@ export async function GET(request: Request) {
         staff: [...staffTally.values()].sort((a, b) => b.count - a.count),
       },
     });
-  });
+  }, request);
 }

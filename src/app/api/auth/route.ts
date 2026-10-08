@@ -1,72 +1,33 @@
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { owners, salons } from "@/db/schema";
-import { createSession, destroySession, verifyPassword } from "@/lib/auth";
+﻿import { createSession, destroySession, requireRecentSignIn } from "@/lib/auth";
 import { fail, guarded, ok, str } from "@/lib/api-helpers";
 import { createSalonWorkspace } from "@/lib/onboarding";
+import { assertAuthMutation, issueAuthCsrf } from "@/lib/auth-csrf";
+import { verifyFirebaseIdToken, FirebaseAccessError } from "@/lib/firebase/auth";
+import { getFirebaseAdminAuth } from "@/lib/firebase/admin";
 
+export async function GET(request: Request) {
+  return guarded(async () => ok({ csrfToken: await issueAuthCsrf(request) }), false);
+}
 export async function POST(request: Request) {
   return guarded(async () => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    await assertAuthMutation(request);
+    const raw = await request.json().catch(() => null);
+    const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
     const action = str(body.action);
-
-    if (action === "logout") {
-      await destroySession();
-      return ok({ ok: true });
-    }
-
-    const email = str(body.email).toLowerCase();
-    const password = str(body.password);
-
-    if (action === "login") {
-      if (!email || !password) return fail("Enter your email and password.");
-      const rows = await db
-        .select({
-          id: owners.id,
-          passwordHash: owners.passwordHash,
-          slug: salons.slug,
-        })
-        .from(owners)
-        .innerJoin(salons, eq(salons.id, owners.salonId))
-        .where(eq(owners.email, email))
-        .limit(1);
-      const row = rows[0];
-      if (!row || !verifyPassword(password, row.passwordHash)) {
-        return fail("That email and password don't match an account.", 401);
-      }
-      await createSession(row.id);
-      return ok({ ok: true, slug: row.slug });
-    }
-
+    if (action === "logout") { await destroySession(); return ok({ ok: true }); }
+    if (action !== "login" && action !== "signup") return fail("Unknown action.");
+    const idToken = str(body.idToken);
     if (action === "signup") {
-      const salonName = str(body.salonName);
-      const ownerName = str(body.ownerName);
+      const salonName = str(body.salonName), ownerName = str(body.ownerName);
       if (!salonName) return fail("Tell us your salon's name.");
       if (!ownerName) return fail("Tell us your name.");
-      if (!email.includes("@")) return fail("Enter a valid email address.");
-      if (password.length < 8) return fail("Use a password with at least 8 characters.");
-
-      const existing = await db
-        .select({ id: owners.id })
-        .from(owners)
-        .where(eq(owners.email, email))
-        .limit(1);
-      if (existing.length > 0) {
-        return fail("An account already uses that email. Try signing in instead.", 409);
-      }
-
-      const { salon, owner } = await createSalonWorkspace({
-        salonName,
-        ownerName,
-        email,
-        password,
-        phone: str(body.phone) || undefined,
-        city: str(body.city) || undefined,
-      });
-      await createSession(owner.id);
-      return ok({ ok: true, slug: salon.slug }, 201);
+      const token = await verifyFirebaseIdToken(idToken);
+      requireRecentSignIn(token);
+      const account = await getFirebaseAdminAuth().getUser(token.uid);
+      if (account.disabled || !account.email) throw new FirebaseAccessError("This account cannot provision a salon.", 403);
+      await createSalonWorkspace({uid:token.uid,email:account.email.toLowerCase(),salonName,ownerName,phone:str(body.phone)||undefined,city:str(body.city)||undefined});
     }
-
-    return fail("Unknown action.");
-  });
+    const user = await createSession(idToken);
+    return ok({ ok: true, slug: user.salonSlug }, action === "signup" ? 201 : 200);
+  }, false);
 }

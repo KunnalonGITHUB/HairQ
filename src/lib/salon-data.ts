@@ -1,5 +1,7 @@
-import { and, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
-import { db } from "@/db";
+import { mutate } from "./firestore/store";
+import { salonRepository, workingHoursRepository, queueRepository, staffRepository, serviceRepository, staffServiceRepository, offerRepository, customerRepository, pushSubscriptionRepository, notificationRepository, bookingRepository } from "@/lib/firestore/repositories";
+import { and, desc, eq, gte, inArray, lte, ne, maximum } from "@/lib/firestore/query";
+
 import {
   bookings,
   customers,
@@ -12,27 +14,23 @@ import {
   staff,
   staffServices,
   workingHours,
-} from "@/db/schema";
+} from "@/lib/firestore/fields";
 import { projectQueue, type EngineEntry } from "./queue-engine";
 import { clockLabel, toMinutes } from "./time";
 import { sendPushToCustomers } from "./web-push";
 
 export async function getSalonBySlug(slug: string) {
-  const rows = await db.select().from(salons).where(eq(salons.slug, slug)).limit(1);
+  const rows = await salonRepository.find(null, { where: eq(salons.slug, slug), limit: 1 });
   return rows[0] ?? null;
 }
 
 export async function getSalonById(id: number) {
-  const rows = await db.select().from(salons).where(eq(salons.id, id)).limit(1);
+  const rows = await salonRepository.find(null, { where: eq(salons.id, id), limit: 1 });
   return rows[0] ?? null;
 }
 
 export async function getHours(salonId: number) {
-  return db
-    .select()
-    .from(workingHours)
-    .where(eq(workingHours.salonId, salonId))
-    .orderBy(workingHours.dayOfWeek);
+  return workingHoursRepository.find(salonId, { where: eq(workingHours.salonId, salonId), orderBy: [workingHours.dayOfWeek] });
 }
 
 export function openStatus(
@@ -77,8 +75,7 @@ export type LiveEntry = {
 
 export async function loadLiveQueue(salonId: number, now = new Date()) {
   const [rows, chairsRaw] = await Promise.all([
-    db
-      .select({
+    queueRepository.find(salonId, { select: {
         id: queueEntries.id,
         token: queueEntries.token,
         status: queueEntries.status,
@@ -96,22 +93,11 @@ export async function loadLiveQueue(salonId: number, now = new Date()) {
         serviceName: services.name,
         servicePrice: services.price,
         staffId: queueEntries.staffId,
-      })
-      .from(queueEntries)
-      .innerJoin(customers, eq(customers.id, queueEntries.customerId))
-      .innerJoin(services, eq(services.id, queueEntries.serviceId))
-      .where(
-        and(
+      }, joins: [{ table: "customers", on: eq(customers.id, queueEntries.customerId), left: false }, { table: "services", on: eq(services.id, queueEntries.serviceId), left: false }], where: and(
           eq(queueEntries.salonId, salonId),
           inArray(queueEntries.status, ["waiting", "serving"]),
-        ),
-      )
-      .orderBy(queueEntries.position, queueEntries.id),
-    db
-      .select({ id: staff.id, name: staff.name, active: staff.active, onShift: staff.onShift })
-      .from(staff)
-      .where(eq(staff.salonId, salonId))
-      .orderBy(staff.id),
+        ), orderBy: [queueEntries.position, queueEntries.id] }),
+    staffRepository.find(salonId, { select: { id: staff.id, name: staff.name, active: staff.active, onShift: staff.onShift }, where: eq(staff.salonId, salonId), orderBy: [staff.id] }),
   ]);
 
   const staffNames = new Map(chairsRaw.map((s) => [s.id, s.name]));
@@ -158,13 +144,9 @@ export async function loadLiveQueue(salonId: number, now = new Date()) {
 
 export async function getCatalogue(salonId: number) {
   const [svc, team, links] = await Promise.all([
-    db
-      .select()
-      .from(services)
-      .where(eq(services.salonId, salonId))
-      .orderBy(services.sortOrder, services.id),
-    db.select().from(staff).where(eq(staff.salonId, salonId)).orderBy(staff.id),
-    db.select().from(staffServices).where(eq(staffServices.salonId, salonId)),
+    serviceRepository.find(salonId, { where: eq(services.salonId, salonId), orderBy: [services.sortOrder, services.id] }),
+    staffRepository.find(salonId, { where: eq(staff.salonId, salonId), orderBy: [staff.id] }),
+    staffServiceRepository.find(salonId, { where: eq(staffServices.salonId, salonId) }),
   ]);
   const map = new Map<number, Set<number>>();
   for (const link of links) {
@@ -175,11 +157,7 @@ export async function getCatalogue(salonId: number) {
 }
 
 export async function getActiveOffers(salonId: number) {
-  const rows = await db
-    .select()
-    .from(offers)
-    .where(eq(offers.salonId, salonId))
-    .orderBy(desc(offers.createdAt));
+  const rows = await offerRepository.find(salonId, { where: eq(offers.salonId, salonId), orderBy: [desc(offers.createdAt)] });
   const now = Date.now();
   return rows.filter((o) => o.active && (!o.expiresAt || o.expiresAt.getTime() > now));
 }
@@ -194,31 +172,22 @@ export async function upsertCustomer(params: {
   notes?: string | null;
   email?: string | null;
 }) {
+  return mutate(params.salonId, async () => {
   const phone = params.phone.replace(/[^\d+]/g, "");
-  const existing = await db
-    .select()
-    .from(customers)
-    .where(and(eq(customers.salonId, params.salonId), eq(customers.phone, phone)))
-    .limit(1);
+  const existing = await customerRepository.find(params.salonId, { where: and(eq(customers.salonId, params.salonId), eq(customers.phone, phone)), limit: 1 });
 
   if (existing[0]) {
     const row = existing[0];
-    const patch: Partial<typeof customers.$inferInsert> = { lastActivityAt: new Date() };
+    const patch: Partial<import("@/lib/firestore/entities").Customer> = { lastActivityAt: new Date() };
     if (params.name && params.name !== row.name && row.name.trim() === "") patch.name = params.name;
     if (params.preferredStaffId) patch.preferredStaffId = params.preferredStaffId;
     if (params.notes) patch.notes = params.notes;
     if (params.email) patch.email = params.email;
-    const [updated] = await db
-      .update(customers)
-      .set(patch)
-      .where(eq(customers.id, row.id))
-      .returning();
+    const [updated] = await customerRepository.update(params.salonId, eq(customers.id, row.id), patch);
     return updated;
   }
 
-  const [created] = await db
-    .insert(customers)
-    .values({
+  const [created] = await customerRepository.create(params.salonId, {
       salonId: params.salonId,
       name: params.name || "Guest",
       phone,
@@ -227,9 +196,9 @@ export async function upsertCustomer(params: {
       preferredStaffId: params.preferredStaffId ?? null,
       source: params.source ?? "manual",
       lastActivityAt: new Date(),
-    })
-    .returning();
+    });
   return created;
+  });
 }
 
 export async function pushNotification(params: {
@@ -242,21 +211,16 @@ export async function pushNotification(params: {
   campaignId?: number | null;
   respectOptIn?: boolean;
 }) {
+  return mutate(params.salonId, async () => {
   if (params.respectOptIn) {
-    const sub = await db
-      .select()
-      .from(pushSubscriptions)
-      .where(eq(pushSubscriptions.customerId, params.customerId))
-      .limit(1);
+    const sub = await pushSubscriptionRepository.find(params.salonId, { where: eq(pushSubscriptions.customerId, params.customerId), limit: 1 });
     const row = sub[0];
     if (!row) return null;
     if (params.type === "marketing" && !row.marketingOptIn) return null;
     if (params.type === "queue" && !row.queueOptIn) return null;
     if (params.type === "booking" && !row.bookingOptIn) return null;
   }
-  const [row] = await db
-    .insert(notifications)
-    .values({
+  const [row] = await notificationRepository.create(params.salonId, {
       salonId: params.salonId,
       customerId: params.customerId,
       campaignId: params.campaignId ?? null,
@@ -264,14 +228,13 @@ export async function pushNotification(params: {
       title: params.title,
       body: params.body,
       url: params.url ?? null,
-    })
-    .returning();
+    });
 
   // Fan out over real Web Push so the device wakes even with the PWA closed.
   // Failures never block the in-app feed write above.
   try {
     const salon = await getSalonById(params.salonId);
-    await sendPushToCustomers([params.customerId], {
+    await sendPushToCustomers(params.salonId, [params.customerId], {
       title: params.title,
       body: params.body,
       url: params.url ?? (salon ? `/s/${salon.slug}` : "/"),
@@ -282,19 +245,15 @@ export async function pushNotification(params: {
       requireInteraction: params.type === "queue",
     });
   } catch (err) {
-    console.error("[hairq:push] fan-out failed", err);
+    console.error("[hairq:push] fan-out failed", err instanceof Error ? err.name : "UnknownError");
   }
 
   return row;
+  });
 }
 
 export async function nextQueuePosition(salonId: number) {
-  const rows = await db
-    .select({ max: sql<number>`coalesce(max(${queueEntries.position}), 0)` })
-    .from(queueEntries)
-    .where(
-      and(eq(queueEntries.salonId, salonId), inArray(queueEntries.status, ["waiting", "serving"])),
-    );
+  const rows = await queueRepository.find(salonId, { select: { max: maximum(queueEntries.position, 0) }, where: and(eq(queueEntries.salonId, salonId), inArray(queueEntries.status, ["waiting", "serving"])) });
   return (rows[0]?.max ?? 0) + 1;
 }
 
@@ -303,23 +262,18 @@ export async function dayBookings(salonId: number, day: Date) {
   start.setHours(0, 0, 0, 0);
   const end = new Date(day);
   end.setHours(23, 59, 59, 999);
-  return db
-    .select({
+  return bookingRepository.find(salonId, { select: {
       id: bookings.id,
       staffId: bookings.staffId,
       scheduledAt: bookings.scheduledAt,
       durationMin: bookings.durationMin,
       status: bookings.status,
-    })
-    .from(bookings)
-    .where(
-      and(
+    }, where: and(
         eq(bookings.salonId, salonId),
         gte(bookings.scheduledAt, start),
         lte(bookings.scheduledAt, end),
         ne(bookings.status, "cancelled"),
-      ),
-    );
+      ) });
 }
 
 export function brandVars(salon: {

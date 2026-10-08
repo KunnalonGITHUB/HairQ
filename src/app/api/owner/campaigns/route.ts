@@ -1,6 +1,8 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
-import { db } from "@/db";
-import { campaigns, customers, notifications, pushSubscriptions, visits } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { customerRepository, visitRepository, campaignRepository, notificationRepository } from "@/lib/firestore/repositories";
+import { and, desc, eq, inArray } from "@/lib/firestore/query";
+
+import { campaigns, customers, notifications, pushSubscriptions, visits } from "@/lib/firestore/fields";
 import { fail, num, ok, str, withOwner } from "@/lib/api-helpers";
 import { getSalonById } from "@/lib/salon-data";
 import { sendPushToCustomers } from "@/lib/web-push";
@@ -13,17 +15,13 @@ async function resolveAudience(
   selectedIds: number[],
   serviceId: number | null,
 ): Promise<Recipient[]> {
-  const rows = await db
-    .select({
+  const rows = await customerRepository.find(salonId, { select: {
       id: customers.id,
       name: customers.name,
       totalVisits: customers.totalVisits,
       lastVisitAt: customers.lastVisitAt,
       marketingOptIn: pushSubscriptions.marketingOptIn,
-    })
-    .from(customers)
-    .innerJoin(pushSubscriptions, eq(pushSubscriptions.customerId, customers.id))
-    .where(and(eq(customers.salonId, salonId), eq(pushSubscriptions.marketingOptIn, true)));
+    }, joins: [{ table: "pushSubscriptions", on: eq(pushSubscriptions.customerId, customers.id), left: false }], where: and(eq(customers.salonId, salonId), eq(pushSubscriptions.marketingOptIn, true)) });
 
   const now = Date.now();
   const DAY = 86400000;
@@ -40,41 +38,26 @@ async function resolveAudience(
     );
   }
   if (segment === "service" && serviceId) {
-    const used = await db
-      .select({ customerId: visits.customerId })
-      .from(visits)
-      .where(and(eq(visits.salonId, salonId), eq(visits.serviceId, serviceId)));
+    const used = await visitRepository.find(salonId, { select: { customerId: visits.customerId }, where: and(eq(visits.salonId, salonId), eq(visits.serviceId, serviceId)) });
     const ids = new Set(used.map((u) => u.customerId));
     return rows.filter((r) => ids.has(r.id));
   }
   return rows;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   return withOwner(async (user) => {
     const [rows, optedIn, delivered] = await Promise.all([
-      db
-        .select()
-        .from(campaigns)
-        .where(eq(campaigns.salonId, user.salonId))
-        .orderBy(desc(campaigns.createdAt))
-        .limit(50),
-      db
-        .select({
+      campaignRepository.find(user.salonId, { where: eq(campaigns.salonId, user.salonId), orderBy: [desc(campaigns.createdAt)], limit: 50 }),
+      customerRepository.find(user.salonId, { select: {
           id: customers.id,
           name: customers.name,
           phone: customers.phone,
           totalVisits: customers.totalVisits,
           lastVisitAt: customers.lastVisitAt,
           marketingOptIn: pushSubscriptions.marketingOptIn,
-        })
-        .from(customers)
-        .innerJoin(pushSubscriptions, eq(pushSubscriptions.customerId, customers.id))
-        .where(and(eq(customers.salonId, user.salonId), eq(pushSubscriptions.marketingOptIn, true))),
-      db
-        .select({ id: notifications.id, type: notifications.type, readAt: notifications.readAt })
-        .from(notifications)
-        .where(eq(notifications.salonId, user.salonId)),
+        }, joins: [{ table: "pushSubscriptions", on: eq(pushSubscriptions.customerId, customers.id), left: false }], where: and(eq(customers.salonId, user.salonId), eq(pushSubscriptions.marketingOptIn, true)) }),
+      notificationRepository.find(user.salonId, { select: { id: notifications.id, type: notifications.type, readAt: notifications.readAt }, where: eq(notifications.salonId, user.salonId) }),
     ]);
 
     const now = Date.now();
@@ -96,12 +79,12 @@ export async function GET() {
         opened: delivered.filter((d) => d.readAt).length,
       },
     });
-  });
+  }, request);
 }
 
 export async function POST(request: Request) {
   return withOwner(async (user) => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const title = str(body.title);
     const message = str(body.body);
     const segment = str(body.segment) || "all_opted_in";
@@ -123,9 +106,7 @@ export async function POST(request: Request) {
       const when = str(body.scheduledFor);
       const at = new Date(when);
       if (!when || Number.isNaN(at.getTime())) return fail("Pick when this should go out.");
-      const [campaign] = await db
-        .insert(campaigns)
-        .values({
+      const [campaign] = await campaignRepository.create(user.salonId, {
           salonId: user.salonId,
           title,
           body: message,
@@ -137,8 +118,7 @@ export async function POST(request: Request) {
           audienceCount: recipients.length,
           scheduledFor: at,
           expiresAt: str(body.expiresAt) ? new Date(str(body.expiresAt)) : null,
-        })
-        .returning();
+        });
       return ok({ campaign, scheduled: true, recipients: recipients.length }, 201);
     }
 
@@ -148,9 +128,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const [campaign] = await db
-      .insert(campaigns)
-      .values({
+    const [campaign] = await campaignRepository.create(user.salonId, {
         salonId: user.salonId,
         title,
         body: message,
@@ -162,13 +140,11 @@ export async function POST(request: Request) {
         audienceCount: recipients.length,
         sentAt: new Date(),
         expiresAt: str(body.expiresAt) ? new Date(str(body.expiresAt)) : null,
-      })
-      .returning();
+      });
 
     const targetUrl = str(body.ctaUrl) || `/s/${salon.slug}`;
 
-    await db.insert(notifications).values(
-      recipients.map((r) => ({
+    await notificationRepository.create(user.salonId, recipients.map((r) => ({
         salonId: user.salonId,
         customerId: r.id,
         campaignId: campaign.id,
@@ -176,12 +152,12 @@ export async function POST(request: Request) {
         title,
         body: message,
         url: targetUrl,
-      })),
-    );
+      })));
 
     // Deliver over real Web Push in one batch so devices receive it even when
     // the salon PWA is closed.
     const delivery = await sendPushToCustomers(
+      user.salonId,
       recipients.map((r) => r.id),
       {
         title,
@@ -195,25 +171,22 @@ export async function POST(request: Request) {
     );
 
     return ok({ campaign, recipients: recipients.length, delivery }, 201);
-  });
+  }, request);
 }
 
 export async function PATCH(request: Request) {
   return withOwner(async (user) => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const id = num(body.id);
     if (!id) return fail("Missing campaign.");
     if (str(body.action) === "cancel") {
-      await db
-        .update(campaigns)
-        .set({ status: "draft" })
-        .where(and(eq(campaigns.id, id), eq(campaigns.salonId, user.salonId)));
+      await campaignRepository.update(user.salonId, and(eq(campaigns.id, id), eq(campaigns.salonId, user.salonId)), { status: "draft" });
       return ok({ ok: true });
     }
     if (str(body.action) === "delete") {
-      await db.delete(campaigns).where(and(eq(campaigns.id, id), eq(campaigns.salonId, user.salonId)));
+      await campaignRepository.remove(user.salonId, and(eq(campaigns.id, id), eq(campaigns.salonId, user.salonId)));
       return ok({ ok: true });
     }
     return fail("Unknown action.");
-  });
+  }, request);
 }

@@ -1,102 +1,74 @@
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+﻿import "server-only";
+import { randomBytes } from "node:crypto";
 import { cookies } from "next/headers";
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { owners, salons, sessions } from "@/db/schema";
+import type { DecodedIdToken } from "firebase-admin/auth";
+import { getFirebaseAdminAuth } from "./firebase/admin";
+import { FirebaseAccessError, getAuthenticatedFirebaseUser } from "./firebase/auth";
+import { findFirebaseUser } from "./firebase/repositories/users";
+import { getSalonById } from "./salon-data";
 
-const COOKIE = "hq_session";
-const DAY = 1000 * 60 * 60 * 24;
-
-export function hashPassword(password: string): string {
-  const salt = randomBytes(16).toString("hex");
-  const key = scryptSync(password, salt, 64).toString("hex");
-  return `${salt}:${key}`;
+export const SESSION_COOKIE = "hq_firebase_session";
+const SESSION_MS = 14 * 24 * 60 * 60 * 1000;
+export const OPERATOR_ROLES = ["owner", "manager", "front_desk"] as const;
+export type SessionUser = { uid: string; ownerId: number | null; name: string; email: string; role: string; salonId: number; salonName: string; salonSlug: string };
+// Queue/booking capability tokens are unrelated to authentication.
+export function newToken(size = 24): string { return randomBytes(size).toString("base64url"); }
+async function authorizedUser(uid: string): Promise<SessionUser> {
+  const profile = await findFirebaseUser(uid);
+  if (!profile?.active || !OPERATOR_ROLES.some(role => role === profile.role)) throw new FirebaseAccessError("This account has no active salon authorization. Contact your salon administrator.", 403);
+  const salonId = Number(profile.salonId);
+  if (!Number.isSafeInteger(salonId) || salonId < 1 || String(salonId) !== profile.salonId) throw new FirebaseAccessError("Salon access denied.", 403);
+  const salon = await getSalonById(salonId);
+  if (!salon) throw new FirebaseAccessError("Salon access denied.", 403);
+  return { uid, ownerId: profile.legacyOwnerId ?? null, name: profile.name, email: profile.email, role: profile.role, salonId, salonName: salon.name, salonSlug: salon.slug };
 }
-
-export function verifyPassword(password: string, stored: string): boolean {
-  const [salt, key] = stored.split(":");
-  if (!salt || !key) return false;
-  const derived = scryptSync(password, salt, 64);
-  const original = Buffer.from(key, "hex");
-  if (derived.length !== original.length) return false;
-  return timingSafeEqual(derived, original);
+export function requireRecentSignIn(token: DecodedIdToken): void {
+  const age = Date.now() / 1000 - token.auth_time;
+  if (!Number.isFinite(age) || age > 300 || age < -60 || token.firebase?.sign_in_provider !== "password") throw new FirebaseAccessError("Please sign in again using email and password.", 401);
 }
-
-export function newToken(size = 24): string {
-  return randomBytes(size).toString("base64url");
-}
-
-export async function createSession(ownerId: number): Promise<void> {
-  const token = newToken(32);
-  const expiresAt = new Date(Date.now() + 30 * DAY);
-  await db.insert(sessions).values({ token, ownerId, expiresAt });
+export async function createSession(idToken: string): Promise<SessionUser> {
+  const authenticated = await getAuthenticatedFirebaseUser(idToken);
+  requireRecentSignIn(authenticated.token);
+  const user = await authorizedUser(authenticated.token.uid);
+  const value = await getFirebaseAdminAuth().createSessionCookie(idToken, { expiresIn: SESSION_MS });
   const jar = await cookies();
-  jar.set(COOKIE, token, {
-    httpOnly: true,
-    sameSite: "lax",
-    path: "/",
-    expires: expiresAt,
-  });
-}
-
-export async function destroySession(): Promise<void> {
-  const jar = await cookies();
-  const token = jar.get(COOKIE)?.value;
-  if (token) await db.delete(sessions).where(eq(sessions.token, token));
-  jar.delete(COOKIE);
-}
-
-export type SessionUser = {
-  ownerId: number;
-  name: string;
-  email: string;
-  role: string;
-  salonId: number;
-  salonName: string;
-  salonSlug: string;
-};
-
-export async function getSessionUser(): Promise<SessionUser | null> {
-  const jar = await cookies();
-  const token = jar.get(COOKIE)?.value;
-  if (!token) return null;
-
-  const rows = await db
-    .select({
-      ownerId: owners.id,
-      name: owners.name,
-      email: owners.email,
-      role: owners.role,
-      salonId: salons.id,
-      salonName: salons.name,
-      salonSlug: salons.slug,
-      expiresAt: sessions.expiresAt,
-    })
-    .from(sessions)
-    .innerJoin(owners, eq(owners.id, sessions.ownerId))
-    .innerJoin(salons, eq(salons.id, owners.salonId))
-    .where(eq(sessions.token, token))
-    .limit(1);
-
-  const row = rows[0];
-  if (!row) return null;
-  if (row.expiresAt.getTime() < Date.now()) {
-    await db.delete(sessions).where(eq(sessions.token, token));
-    return null;
-  }
-  const { expiresAt: _expiresAt, ...user } = row;
+  jar.set(SESSION_COOKIE, value, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: SESSION_MS / 1000 });
+  jar.delete("hq_session");
   return user;
 }
-
+function invalidCredential(error: unknown): boolean {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  return ["auth/argument-error", "auth/invalid-session-cookie", "auth/session-cookie-expired", "auth/session-cookie-revoked", "auth/user-disabled", "auth/user-not-found", "auth/invalid-id-token", "auth/id-token-expired"].includes(code);
+}
+export async function getSessionUser(): Promise<SessionUser | null> {
+  const value = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (!value) return null;
+  let token: DecodedIdToken;
+  const auth = getFirebaseAdminAuth();
+  try { token = await auth.verifySessionCookie(value, true); }
+  catch (error) { if (invalidCredential(error)) return null; throw error; }
+  return authorizedUser(token.uid);
+}
+export async function getPageSessionUser(): Promise<SessionUser | null> {
+  try { return await getSessionUser(); }
+  catch (error) { if (error instanceof FirebaseAccessError) return null; throw error; }
+}
+export async function destroySession(): Promise<void> {
+  const jar = await cookies();
+  const value = jar.get(SESSION_COOKIE)?.value;
+  try {
+    if (value) {
+      const auth = getFirebaseAdminAuth();
+      let token: DecodedIdToken | null = null;
+      try { token = await auth.verifySessionCookie(value, true); }
+      catch (error) { if (!invalidCredential(error)) throw error; }
+      if (token) await auth.revokeRefreshTokens(token.uid);
+    }
+  } finally { jar.delete(SESSION_COOKIE); jar.delete("hq_session"); }
+}
+export class UnauthorizedError extends Error { constructor() { super("Not signed in"); this.name = "UnauthorizedError"; } }
 export async function requireSession(): Promise<SessionUser> {
   const user = await getSessionUser();
   if (!user) throw new UnauthorizedError();
   return user;
-}
-
-export class UnauthorizedError extends Error {
-  constructor() {
-    super("Not signed in");
-    this.name = "UnauthorizedError";
-  }
 }

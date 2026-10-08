@@ -1,6 +1,8 @@
-import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
-import { db } from "@/db";
-import { customers, pushSubscriptions, services, staff } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { customerRepository, staffRepository, serviceRepository } from "@/lib/firestore/repositories";
+import { and, asc, desc, eq, ilike, or, coalesce } from "@/lib/firestore/query";
+
+import { customers, pushSubscriptions, services, staff } from "@/lib/firestore/fields";
 import { fail, num, ok, str, validPhone, withOwner } from "@/lib/api-helpers";
 import { upsertCustomer } from "@/lib/salon-data";
 
@@ -25,10 +27,9 @@ export async function GET(request: Request) {
           ? desc(customers.totalVisits)
           : sort === "spend"
             ? desc(customers.totalSpend)
-            : desc(sql`coalesce(${customers.lastActivityAt}, ${customers.createdAt})`);
+            : desc(coalesce(customers.lastActivityAt, customers.createdAt));
 
-    const rows = await db
-      .select({
+    const rows = await customerRepository.find(user.salonId, { select: {
         id: customers.id,
         name: customers.name,
         phone: customers.phone,
@@ -48,16 +49,11 @@ export async function GET(request: Request) {
         marketingOptIn: pushSubscriptions.marketingOptIn,
         bookingOptIn: pushSubscriptions.bookingOptIn,
         subscribed: pushSubscriptions.id,
-      })
-      .from(customers)
-      .leftJoin(pushSubscriptions, eq(pushSubscriptions.customerId, customers.id))
-      .where(and(...where))
-      .orderBy(order)
-      .limit(500);
+      }, joins: [{ table: "pushSubscriptions", on: eq(pushSubscriptions.customerId, customers.id), left: true }], where: and(...where), orderBy: [order], limit: 500 });
 
     const [team, svc] = await Promise.all([
-      db.select({ id: staff.id, name: staff.name }).from(staff).where(eq(staff.salonId, user.salonId)),
-      db.select({ id: services.id, name: services.name }).from(services).where(eq(services.salonId, user.salonId)),
+      staffRepository.find(user.salonId, { select: { id: staff.id, name: staff.name }, where: eq(staff.salonId, user.salonId) }),
+      serviceRepository.find(user.salonId, { select: { id: services.id, name: services.name }, where: eq(services.salonId, user.salonId) }),
     ]);
     const staffNames = new Map(team.map((t) => [t.id, t.name]));
     const serviceNames = new Map(svc.map((s) => [s.id, s.name]));
@@ -108,12 +104,12 @@ export async function GET(request: Request) {
       staff: team,
       services: svc,
     });
-  });
+  }, request);
 }
 
 export async function POST(request: Request) {
   return withOwner(async (user) => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const name = str(body.name);
     const phone = str(body.phone);
     if (!name) return fail("Add a name.");
@@ -128,5 +124,5 @@ export async function POST(request: Request) {
       source: "manual",
     });
     return ok({ customer }, 201);
-  });
+  }, request);
 }

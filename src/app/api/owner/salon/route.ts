@@ -1,28 +1,26 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { offers, salons, workingHours } from "@/db/schema";
+import { requestJson } from "@/lib/api-helpers";
+import { salonRepository, workingHoursRepository, offerRepository } from "@/lib/firestore/repositories";
+import { and, eq } from "@/lib/firestore/query";
+
+import { offers, salons, workingHours } from "@/lib/firestore/fields";
 import { bool, fail, num, ok, slugify, str, withOwner } from "@/lib/api-helpers";
 import { uniqueSlug } from "@/lib/onboarding";
 
-export async function GET() {
+export async function GET(request: Request) {
   return withOwner(async (user) => {
     const [salonRows, hours, offerRows] = await Promise.all([
-      db.select().from(salons).where(eq(salons.id, user.salonId)).limit(1),
-      db
-        .select()
-        .from(workingHours)
-        .where(eq(workingHours.salonId, user.salonId))
-        .orderBy(workingHours.dayOfWeek),
-      db.select().from(offers).where(eq(offers.salonId, user.salonId)).orderBy(offers.id),
+      salonRepository.find(null, { where: eq(salons.id, user.salonId), limit: 1 }),
+      workingHoursRepository.find(user.salonId, { where: eq(workingHours.salonId, user.salonId), orderBy: [workingHours.dayOfWeek] }),
+      offerRepository.find(user.salonId, { where: eq(offers.salonId, user.salonId), orderBy: [offers.id] }),
     ]);
     if (!salonRows[0]) return fail("Salon not found", 404);
     return ok({ salon: salonRows[0], hours, offers: offerRows, owner: user });
-  });
+  }, request);
 }
 
 export async function PATCH(request: Request) {
   return withOwner(async (user) => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const body = (await requestJson(request).catch(() => ({}))) as Record<string, unknown>;
     const section = str(body.section);
 
     if (section === "hours") {
@@ -30,18 +28,13 @@ export async function PATCH(request: Request) {
       for (const row of rows) {
         const dayOfWeek = num(row.dayOfWeek);
         if (dayOfWeek === null) continue;
-        await db
-          .update(workingHours)
-          .set({
+        await workingHoursRepository.update(user.salonId, and(eq(workingHours.salonId, user.salonId), eq(workingHours.dayOfWeek, dayOfWeek)), {
             isClosed: bool(row.isClosed),
             openTime: str(row.openTime) || "10:00",
             closeTime: str(row.closeTime) || "21:00",
             breakStart: str(row.breakStart) || null,
             breakEnd: str(row.breakEnd) || null,
-          })
-          .where(
-            and(eq(workingHours.salonId, user.salonId), eq(workingHours.dayOfWeek, dayOfWeek)),
-          );
+          });
       }
       return ok({ ok: true });
     }
@@ -51,22 +44,19 @@ export async function PATCH(request: Request) {
       if (action === "create") {
         const title = str(body.title);
         if (!title) return fail("Give the offer a title.");
-        const [created] = await db
-          .insert(offers)
-          .values({
+        const [created] = await offerRepository.create(user.salonId, {
             salonId: user.salonId,
             title,
             description: str(body.description) || null,
             badge: str(body.badge) || null,
             expiresAt: str(body.expiresAt) ? new Date(str(body.expiresAt)) : null,
-          })
-          .returning();
+          });
         return ok({ offer: created }, 201);
       }
       const id = num(body.id);
       if (!id) return fail("Missing offer.");
       if (action === "delete") {
-        await db.delete(offers).where(and(eq(offers.id, id), eq(offers.salonId, user.salonId)));
+        await offerRepository.remove(user.salonId, and(eq(offers.id, id), eq(offers.salonId, user.salonId)));
         return ok({ ok: true });
       }
       const patch: Record<string, unknown> = {};
@@ -74,10 +64,7 @@ export async function PATCH(request: Request) {
       if ("description" in body) patch.description = str(body.description) || null;
       if ("badge" in body) patch.badge = str(body.badge) || null;
       if ("active" in body) patch.active = bool(body.active, true);
-      await db
-        .update(offers)
-        .set(patch)
-        .where(and(eq(offers.id, id), eq(offers.salonId, user.salonId)));
+      await offerRepository.update(user.salonId, and(eq(offers.id, id), eq(offers.salonId, user.salonId)), patch);
       return ok({ ok: true });
     }
 
@@ -122,18 +109,14 @@ export async function PATCH(request: Request) {
     if ("slug" in body) {
       const wanted = slugify(str(body.slug));
       if (!wanted) return fail("Your link needs at least a few letters.");
-      const current = await db.select().from(salons).where(eq(salons.id, user.salonId)).limit(1);
+      const current = await salonRepository.find(null, { where: eq(salons.id, user.salonId), limit: 1 });
       if (current[0] && current[0].slug !== wanted) {
         patch.slug = await uniqueSlug(wanted);
       }
     }
 
     if (Object.keys(patch).length === 0) return fail("Nothing to update.");
-    const [updated] = await db
-      .update(salons)
-      .set(patch)
-      .where(eq(salons.id, user.salonId))
-      .returning();
+    const [updated] = await salonRepository.update(user.salonId, eq(salons.id, user.salonId), patch);
     return ok({ salon: updated });
-  });
+  }, request);
 }

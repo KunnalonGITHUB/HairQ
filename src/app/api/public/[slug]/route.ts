@@ -1,6 +1,7 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { services, staff } from "@/db/schema";
+import { serviceRepository, staffRepository } from "@/lib/firestore/repositories";
+import { and, eq } from "@/lib/firestore/query";
+
+import { services, staff } from "@/lib/firestore/fields";
 import { fail, guarded, ok } from "@/lib/api-helpers";
 import {
   getActiveOffers,
@@ -21,16 +22,8 @@ export async function GET(_request: Request, ctx: { params: Promise<{ slug: stri
     const [hours, live, svc, team, offers] = await Promise.all([
       getHours(salon.id),
       loadLiveQueue(salon.id, now),
-      db
-        .select()
-        .from(services)
-        .where(and(eq(services.salonId, salon.id), eq(services.active, true)))
-        .orderBy(services.sortOrder, services.id),
-      db
-        .select()
-        .from(staff)
-        .where(and(eq(staff.salonId, salon.id), eq(staff.active, true)))
-        .orderBy(staff.id),
+      serviceRepository.find(salon.id, { where: and(eq(services.salonId, salon.id), eq(services.active, true)), orderBy: [services.sortOrder, services.id] }),
+      staffRepository.find(salon.id, { where: and(eq(staff.salonId, salon.id), eq(staff.active, true)), orderBy: [staff.id] }),
       getActiveOffers(salon.id),
     ]);
 
