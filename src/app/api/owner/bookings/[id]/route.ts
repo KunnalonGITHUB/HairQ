@@ -7,6 +7,8 @@ import { fail, num, ok, str, withOwner } from "@/lib/api-helpers";
 import { newToken } from "@/lib/auth";
 import { getSalonById, nextQueuePosition, pushNotification } from "@/lib/salon-data";
 import { syncQueueNotifications } from "@/lib/queue-actions";
+import { isOnSlotGrid } from "@/lib/availability";
+import { formatSalonDate, formatSalonTime } from "@/lib/salon-time";
 
 export async function PATCH(request: Request, ctx: { params: Promise<{ id: string }> }) {
   return withOwner(async (user) => {
@@ -45,18 +47,16 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
         const when = str(body.scheduledAt);
         const next = new Date(when);
         if (!when || Number.isNaN(next.getTime())) return fail("Pick a new date and time.");
+        if (!isOnSlotGrid(next)) return fail("Appointments start on the hour or half hour, like 4:00 or 4:30.");
         await bookingRepository.update(user.salonId, eq(bookings.id, bookingId), { status: "confirmed", scheduledAt: next });
         await pushNotification({
           salonId: user.salonId,
           customerId: booking.customerId,
           type: "booking",
           title: "Appointment Moved 📅",
-          body: `New time: ${next.toLocaleDateString("en-US", {
+          body: `New time: ${formatSalonDate(next, {
             weekday: "long",
-          })} at ${next.toLocaleTimeString("en-US", {
-            hour: "numeric",
-            minute: "2-digit",
-          })}.\nRescheduled by ${salon.name}.`,
+          })} at ${formatSalonTime(next)}.\nRescheduled by ${salon.name}.`,
           url: `/s/${salon.slug}/b/${booking.token}`,
         });
         break;

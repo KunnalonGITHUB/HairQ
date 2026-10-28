@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { SalonTopBar } from "@/components/customer/chrome";
 import { IconCheck, IconMapPin, IconPhone } from "@/components/icons";
 import { api, cx, Modal, Spinner, toast } from "@/components/ui";
+import { formatSalonDate, formatSalonTime } from "@/lib/salon-time";
 
 type Payload = {
   booking: {
@@ -112,10 +113,10 @@ export function BookingConfirmation({ slug, token }: { slug: string; token: stri
           <div className="border-b border-line bg-paper-2 px-5 py-4">
             <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">When</p>
             <p className="mt-1 text-[19px] font-semibold tracking-[-0.02em]">
-              {when.toLocaleDateString("en-US", { weekday: "long", day: "numeric", month: "long" })}
+              {formatSalonDate(when, { weekday: "long", day: "numeric", month: "long" })}
             </p>
             <p className="num text-[15px] text-ink-2">
-              {when.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} ·{" "}
+              {formatSalonTime(when)} ·{" "}
               {data.booking.durationMin} min
             </p>
           </div>
@@ -175,8 +176,8 @@ export function BookingConfirmation({ slug, token }: { slug: string; token: stri
         }
       >
         <p className="text-[13.5px] leading-relaxed text-ink-2">
-          Your {when.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} slot on{" "}
-          {when.toLocaleDateString("en-US", { weekday: "long" })} will be released for other customers.
+          Your {formatSalonTime(when)} slot on{" "}
+          {formatSalonDate(when, { weekday: "long" })} will be released for other customers.
         </p>
       </Modal>
     </>

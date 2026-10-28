@@ -517,13 +517,8 @@ export function SettingsView() {
                   />
                 </Labeled>
                 <Labeled label="Slot interval (minutes)">
-                  <input
-                    type="number"
-                    step={5}
-                    className="field"
-                    value={salon.slotIntervalMin}
-                    onChange={(e) => patch({ slotIntervalMin: Number(e.target.value) })}
-                  />
+                  {/* Slots are always generated every 30 minutes (see lib/availability). */}
+                  <input type="number" className="field" value={30} disabled readOnly />
                 </Labeled>
               </div>
               <button

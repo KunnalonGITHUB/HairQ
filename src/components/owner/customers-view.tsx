@@ -6,6 +6,7 @@ import { PageHead, Panel, StatTile } from "@/components/owner/shell";
 import { IconPlus, IconSearch, IconUsers } from "@/components/icons";
 import { api, Avatar, cx, EmptyState, Labeled, Modal, Spinner, toast } from "@/components/ui";
 import { sinceLabel } from "@/lib/time";
+import { formatSalonDate, formatSalonTime } from "@/lib/salon-time";
 
 type Row = {
   id: number;
@@ -455,13 +456,13 @@ export function CustomerProfile({ id }: { id: number }) {
                 <div key={b.id} className="flex items-center justify-between py-1.5">
                   <div>
                     <p className="text-[13.5px] font-medium">
-                      {new Date(b.scheduledAt).toLocaleDateString("en-US", {
+                      {formatSalonDate(new Date(b.scheduledAt), {
                         weekday: "short",
                         day: "numeric",
                         month: "short",
                       })}
                       {" · "}
-                      {new Date(b.scheduledAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                      {formatSalonTime(new Date(b.scheduledAt))}
                     </p>
                     <p className="text-[12px] text-muted">
                       {b.serviceName}

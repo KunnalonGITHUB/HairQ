@@ -15,7 +15,13 @@ import {
   toast,
   usePoll,
 } from "@/components/ui";
-import { relativeDay } from "@/lib/time";
+import {
+  formatSalonTime,
+  fromSalonInputValue,
+  nextSalonHalfHour,
+  relativeSalonDay,
+  toSalonInputValue,
+} from "@/lib/salon-time";
 
 type Booking = {
   id: number;
@@ -138,9 +144,9 @@ export function BookingsView({ openAdd }: { openAdd?: boolean }) {
               >
                 <div className="w-[76px] shrink-0">
                   <p className="num text-[15px] font-semibold leading-tight">
-                    {at.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                    {formatSalonTime(at)}
                   </p>
-                  <p className="text-[11.5px] text-muted">{relativeDay(at)}</p>
+                  <p className="text-[11.5px] text-muted">{relativeSalonDay(at)}</p>
                 </div>
                 <div className="min-w-[140px] flex-1">
                   <p className="truncate text-[14px] font-medium leading-tight">{b.customerName}</p>
@@ -230,11 +236,9 @@ export function BookingsView({ openAdd }: { openAdd?: boolean }) {
   );
 }
 
+/** The date-time pickers always show and accept salon (Asia/Kolkata) time. */
 function toLocalInput(date: Date) {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(
-    date.getMinutes(),
-  )}`;
+  return toSalonInputValue(date);
 }
 
 function AddBooking({
@@ -258,8 +262,8 @@ function AddBooking({
 
   useEffect(() => {
     if (open) {
-      const next = new Date();
-      next.setMinutes(next.getMinutes() + 60, 0, 0);
+      // An hour from now, rounded up to the next :00 / :30 so the default is a valid slot.
+      const next = nextSalonHalfHour(new Date(Date.now() + 60 * 60000));
       setWhen(toLocalInput(next));
       setName("");
       setPhone("");
@@ -278,7 +282,7 @@ function AddBooking({
           phone,
           serviceId: serviceId || null,
           staffId: staffId || null,
-          scheduledAt: when ? new Date(when).toISOString() : "",
+          scheduledAt: fromSalonInputValue(when)?.toISOString() ?? "",
           notes,
         },
       });
@@ -345,7 +349,7 @@ function AddBooking({
           </Labeled>
         </div>
         <Labeled label="Date & time">
-          <input type="datetime-local" className="field" value={when} onChange={(e) => setWhen(e.target.value)} />
+          <input type="datetime-local" step={1800} className="field" value={when} onChange={(e) => setWhen(e.target.value)} />
         </Labeled>
         <Labeled label="Notes">
           <input className="field" value={notes} onChange={(e) => setNotes(e.target.value)} />
@@ -378,7 +382,7 @@ function RescheduleModal({
     try {
       await api(`/api/owner/bookings/${booking.id}`, {
         method: "PATCH",
-        body: { action: "reschedule", scheduledAt: new Date(when).toISOString() },
+        body: { action: "reschedule", scheduledAt: fromSalonInputValue(when)?.toISOString() ?? "" },
       });
       toast("Appointment moved — the customer has been notified.");
       onDone();
@@ -407,7 +411,7 @@ function RescheduleModal({
       }
     >
       <Labeled label="New date & time">
-        <input type="datetime-local" className="field" value={when} onChange={(e) => setWhen(e.target.value)} />
+        <input type="datetime-local" step={1800} className="field" value={when} onChange={(e) => setWhen(e.target.value)} />
       </Labeled>
     </Modal>
   );

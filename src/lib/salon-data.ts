@@ -17,6 +17,7 @@ import {
 } from "@/lib/firestore/fields";
 import { projectQueue, type EngineEntry } from "./queue-engine";
 import { clockLabel, toMinutes } from "./time";
+import { salonEndOfDay, salonStartOfDay } from "./salon-time";
 import { sendPushToCustomers } from "./web-push";
 
 export async function getSalonBySlug(slug: string) {
@@ -258,10 +259,9 @@ export async function nextQueuePosition(salonId: number) {
 }
 
 export async function dayBookings(salonId: number, day: Date) {
-  const start = new Date(day);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(day);
-  end.setHours(23, 59, 59, 999);
+  // The salon's calendar day, not the server's.
+  const start = salonStartOfDay(day);
+  const end = salonEndOfDay(day);
   return bookingRepository.find(salonId, { select: {
       id: bookings.id,
       staffId: bookings.staffId,

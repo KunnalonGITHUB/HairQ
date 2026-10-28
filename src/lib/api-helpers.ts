@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSessionUser, type SessionUser } from "./auth";
 import { RepositoryError, runTransaction } from "./firestore/store";
 import { FirebaseAccessError } from "./firebase/auth";
+import { FirebaseConfigurationError } from "./firebase/admin-env";
 import { assertAuthMutation } from "./auth-csrf";
 
 // Firestore can retry transaction callbacks. Read each request body once.
@@ -25,6 +26,18 @@ function firestoreFailure(error: unknown): Response | null {
   if (code === 8 || code === "resource-exhausted") return fail("The service is busy. Please try again shortly.", 429);
   if ([4, 14, "deadline-exceeded", "unavailable"].includes(code as number | string)) return fail("The service is temporarily unavailable. Please try again.", 503);
   return null;
+}
+
+/**
+ * Logs only the error name, except for configuration errors, whose messages
+ * name the missing or invalid variables and never contain secret values.
+ */
+function logRouteError(label: string, err: unknown) {
+  if (err instanceof FirebaseConfigurationError) {
+    console.error(`[hairq] ${label}: ${err.message}`);
+    return;
+  }
+  console.error(`[hairq] ${label}`, err instanceof Error ? err.name : "UnknownError");
 }
 
 export async function withOwner(
@@ -51,7 +64,7 @@ export async function withOwner(
     if (err instanceof RepositoryError) return fail(err.message, err.status);
     const retryable = firestoreFailure(err);
     if (retryable) return retryable;
-    console.error("[hairq] owner route error", err instanceof Error ? err.name : "UnknownError");
+    logRouteError("owner route error", err);
     return fail("Something went wrong on our side. Please try again.", 500);
   }
 }
@@ -64,7 +77,7 @@ export async function guarded(fn: () => Promise<Response>, useFirestore = true):
     if (err instanceof RepositoryError) return fail(err.message, err.status);
     const retryable = firestoreFailure(err);
     if (retryable) return retryable;
-    console.error("[hairq] route error", err instanceof Error ? err.name : "UnknownError");
+    logRouteError("route error", err);
     return fail("Something went wrong on our side. Please try again.", 500);
   }
 }

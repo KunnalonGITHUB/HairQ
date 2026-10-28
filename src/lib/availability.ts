@@ -1,4 +1,5 @@
 import { toMinutes } from "./time";
+import { formatSalonTime, salonClock, salonStartOfDay } from "./salon-time";
 
 export type HoursRow = {
   dayOfWeek: number;
@@ -25,11 +26,24 @@ export type BookingRow = {
   status: string;
 };
 
+/** Every bookable start time sits on this grid: 10:00, 10:30, 11:00 … */
+export const SLOT_INTERVAL_MIN = 30;
+
 export type Slot = {
   time: string; // ISO
   label: string;
+  /** Barbers free for this slot. Empty when the slot is booked. */
   staffIds: number[];
+  /** False when the slot is within hours but every eligible barber is already booked. */
+  available: boolean;
 };
+
+/** True when the time is exactly on a :00 or :30 boundary of the salon clock. */
+export function isOnSlotGrid(date: Date): boolean {
+  if (!Number.isFinite(date.getTime()) || date.getMilliseconds() !== 0) return false;
+  const clock = salonClock(date);
+  return clock.second === 0 && clock.minute % SLOT_INTERVAL_MIN === 0;
+}
 
 function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number) {
   return aStart < bEnd && bStart < aEnd;
@@ -39,7 +53,6 @@ export function buildSlots(params: {
   day: Date;
   hours: HoursRow | undefined;
   durationMin: number;
-  slotIntervalMin: number;
   staff: StaffRow[];
   staffServiceMap: Map<number, Set<number>>;
   serviceId: number;
@@ -52,7 +65,6 @@ export function buildSlots(params: {
     day,
     hours,
     durationMin,
-    slotIntervalMin,
     staff,
     staffServiceMap,
     serviceId,
@@ -69,8 +81,8 @@ export function buildSlots(params: {
   const breakStart = toMinutes(hours.breakStart);
   const breakEnd = toMinutes(hours.breakEnd);
 
-  const dayStart = new Date(day);
-  dayStart.setHours(0, 0, 0, 0);
+  // Salon midnight, so opening hours are read on the salon's own clock.
+  const dayStart = salonStartOfDay(day);
 
   const eligibleStaff = staff.filter((s) => {
     if (!s.active) return false;
@@ -95,29 +107,38 @@ export function buildSlots(params: {
   const minStart = (now.getTime() + leadMin * 60000 - dayStart.getTime()) / 60000;
   const slots: Slot[] = [];
 
-  for (let start = open; start + durationMin <= close; start += slotIntervalMin) {
+  // Align to the clock grid so a 10:15 opening yields 10:30, 11:00 …
+  const firstStart = Math.ceil(open / SLOT_INTERVAL_MIN) * SLOT_INTERVAL_MIN;
+
+  for (let start = firstStart; start + durationMin <= close; start += SLOT_INTERVAL_MIN) {
     const end = start + durationMin;
     if (start < minStart) continue;
     if (breakStart !== null && breakEnd !== null && overlaps(start, end, breakStart, breakEnd)) {
       continue;
     }
 
-    const freeStaff = eligibleStaff.filter((s) => {
+    const onShift = eligibleStaff.filter((s) => {
       const shiftStart = toMinutes(s.shiftStart) ?? open;
       const shiftEnd = toMinutes(s.shiftEnd) ?? close;
-      if (start < shiftStart || end > shiftEnd) return false;
-      return !dayBookings.some(
-        (b) => (b.staffId === null || b.staffId === s.id) && overlaps(start, end, b.start, b.end),
-      );
+      return start >= shiftStart && end <= shiftEnd;
     });
 
-    if (freeStaff.length === 0) continue;
+    // Nobody works this slot at all: not bookable, so not shown.
+    if (onShift.length === 0) continue;
+
+    const freeStaff = onShift.filter(
+      (s) =>
+        !dayBookings.some(
+          (b) => (b.staffId === null || b.staffId === s.id) && overlaps(start, end, b.start, b.end),
+        ),
+    );
 
     const at = new Date(dayStart.getTime() + start * 60000);
     slots.push({
       time: at.toISOString(),
-      label: at.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
+      label: formatSalonTime(at),
       staffIds: freeStaff.map((s) => s.id),
+      available: freeStaff.length > 0,
     });
   }
 

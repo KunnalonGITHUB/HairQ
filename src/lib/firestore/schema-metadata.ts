@@ -157,7 +157,7 @@ export const metadata = {
       "name": "slotIntervalMin",
       "kind": "integer",
       "nullable": false,
-      "default": "15",
+      "default": "30",
       "now": false
     },
     {

@@ -4,7 +4,8 @@ import { and, asc, eq, gte, inArray, lte } from "@/lib/firestore/query";
 import { bookings, customers, services, staff, visits } from "@/lib/firestore/fields";
 import { fail, ok, withOwner } from "@/lib/api-helpers";
 import { getSalonById, loadLiveQueue } from "@/lib/salon-data";
-import { addDays, dateKey, endOfDay, startOfDay } from "@/lib/time";
+import { addDays, dateKey, startOfDay } from "@/lib/time";
+import { salonEndOfDay, salonStartOfDay } from "@/lib/salon-time";
 
 export async function GET(request: Request) {
   return withOwner(async (user) => {
@@ -28,8 +29,8 @@ export async function GET(request: Request) {
           customerId: bookings.customerId,
         }, where: and(
             eq(bookings.salonId, user.salonId),
-            gte(bookings.scheduledAt, startOfDay(now)),
-            lte(bookings.scheduledAt, endOfDay(now)),
+            gte(bookings.scheduledAt, salonStartOfDay(now)),
+            lte(bookings.scheduledAt, salonEndOfDay(now)),
             inArray(bookings.status, ["confirmed", "arrived"]),
           ), orderBy: [asc(bookings.scheduledAt)] }),
       bookingRepository.find(user.salonId, { select: { id: bookings.id }, where: and(

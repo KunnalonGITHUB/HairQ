@@ -234,3 +234,42 @@ test("Malformed stored authorization documents fail closed", async () => {
   data.salonId = null;
   await assert.rejects(findFirebaseUser("owner-1"), /authorization document is invalid/);
 });
+
+test("Admin validation accepts keys pasted with quotes, escaped CRLF or Windows line endings", () => {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const expected = privateKey.trim();
+  for (const pasted of [
+    `"${privateKey.replace(/\n/g, "\n")}"`, // copied straight from the service-account JSON
+    `'${privateKey}'`,
+    privateKey.replace(/\n/g, "\r\n"),
+    privateKey.replace(/\n/g, "\r\n"),
+  ]) {
+    const { getFirebaseAdminEnvironment } = loadModule("admin-env.ts", {}, {
+      FIREBASE_PROJECT_ID: '"hairq-test"',
+      FIREBASE_CLIENT_EMAIL: ' "admin@hairq-test.iam.gserviceaccount.com" ',
+      FIREBASE_PRIVATE_KEY: pasted,
+      NEXT_PUBLIC_FIREBASE_PROJECT_ID: "hairq-test",
+    });
+    const environment = getFirebaseAdminEnvironment();
+    assert.equal(environment.privateKey, expected);
+    assert.equal(environment.clientEmail, "admin@hairq-test.iam.gserviceaccount.com");
+    assert.equal(environment.projectId, "hairq-test");
+  }
+});
+
+test("Admin validation still reports empty or quote-only values as missing", () => {
+  const { getFirebaseAdminEnvironment } = loadModule("admin-env.ts", {}, {
+    FIREBASE_PROJECT_ID: "hairq-test",
+    FIREBASE_CLIENT_EMAIL: '""',
+    FIREBASE_PRIVATE_KEY: "   ",
+  });
+  assert.throws(getFirebaseAdminEnvironment, (error) => {
+    assert.match(error.message, /FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY/);
+    assert.doesNotMatch(error.message, /FIREBASE_PROJECT_ID/);
+    return true;
+  });
+});

@@ -5,6 +5,7 @@ import { PageHead, Panel, StatTile } from "@/components/owner/shell";
 import { IconChevronRight, IconPlus, IconQueue } from "@/components/icons";
 import { cx, EmptyState, StatusChip, usePoll } from "@/components/ui";
 import { humanDuration } from "@/lib/time";
+import { formatSalonTime } from "@/lib/salon-time";
 
 type Summary = {
   salon: { name: string; slug: string; queueStatus: string; currency: string; maxQueueSize: number };
@@ -117,10 +118,7 @@ export function DashboardView({ ownerName }: { ownerName: string }) {
           value={data.today.bookings}
           sub={
             data.today.nextBooking
-              ? `Next ${new Date(data.today.nextBooking.at).toLocaleTimeString("en-US", {
-                  hour: "numeric",
-                  minute: "2-digit",
-                })} · ${data.today.nextBooking.serviceName}`
+              ? `Next ${formatSalonTime(new Date(data.today.nextBooking.at))} · ${data.today.nextBooking.serviceName}`
               : "Nothing else booked today"
           }
         />

@@ -14,7 +14,17 @@ import {
   pushNotification,
   upsertCustomer,
 } from "@/lib/salon-data";
-import { addDays, dateKey, parseDateKey, startOfDay } from "@/lib/time";
+import {
+  addDaysToKey,
+  formatSalonDate,
+  formatSalonTime,
+  isSalonDateKey,
+  salonClock,
+  salonDateKey,
+  salonDayStart,
+  salonEndOfDay,
+  salonWeekday,
+} from "@/lib/salon-time";
 
 export async function GET(request: Request, ctx: { params: Promise<{ slug: string }> }) {
   return guarded(async () => {
@@ -34,28 +44,30 @@ export async function GET(request: Request, ctx: { params: Promise<{ slug: strin
     const service = catalogue.services.find((s) => s.id === serviceId && s.active);
     if (!service) return fail("That service isn't available right now.");
 
+    // Days and dates are the salon's (Asia/Kolkata), whatever the server's timezone.
     const now = new Date();
-    const today = startOfDay(now);
+    const todayKey = salonDateKey(now);
     const days = Array.from({ length: salon.bookingHorizonDays }, (_, i) => {
-      const day = addDays(today, i);
-      const h = hours.find((x) => x.dayOfWeek === day.getDay());
+      const key = addDaysToKey(todayKey, i);
+      const day = salonDayStart(key);
+      const h = hours.find((x) => x.dayOfWeek === salonWeekday(day));
       return {
-        date: dateKey(day),
-        weekday: day.toLocaleDateString("en-US", { weekday: "short" }),
-        dayNum: day.getDate(),
-        month: day.toLocaleDateString("en-US", { month: "short" }),
+        date: key,
+        weekday: formatSalonDate(day, { weekday: "short" }),
+        dayNum: salonClock(day).day,
+        month: formatSalonDate(day, { month: "short" }),
         closed: !h || h.isClosed,
       };
     });
 
-    const target = dateParam ? parseDateKey(dateParam) : today;
+    const targetKey = dateParam && isSalonDateKey(dateParam) ? dateParam : todayKey;
+    const target = salonDayStart(targetKey);
     const existing = await dayBookings(salon.id, target);
 
     const slots = buildSlots({
       day: target,
-      hours: hours.find((h) => h.dayOfWeek === target.getDay()),
+      hours: hours.find((h) => h.dayOfWeek === salonWeekday(target)),
       durationMin: service.durationMin,
-      slotIntervalMin: salon.slotIntervalMin,
       staff: catalogue.staff.filter((s) => s.active),
       staffServiceMap: catalogue.staffServiceMap,
       serviceId,
@@ -66,7 +78,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ slug: strin
 
     return ok({
       days,
-      date: dateKey(target),
+      date: targetKey,
       slots,
       service: { id: service.id, name: service.name, durationMin: service.durationMin, price: service.price },
       acceptingBookings: salon.acceptingBookings,
@@ -98,9 +110,8 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
     const scheduledAt = new Date(when);
     if (Number.isNaN(scheduledAt.getTime())) return fail("That time slot didn't look right.");
     if (scheduledAt.getTime() < Date.now()) return fail("That time has already passed. Pick another slot.");
-    const latest = new Date();
-    latest.setHours(23, 59, 59, 999);
-    latest.setDate(latest.getDate() + salon.bookingHorizonDays - 1);
+    // Last millisecond of the final salon day in the booking window.
+    const latest = salonEndOfDay(salonDayStart(addDaysToKey(salonDateKey(new Date()), salon.bookingHorizonDays - 1)));
     if (scheduledAt > latest) return fail("That date is outside this salon's booking window.", 400);
 
     const svc = await serviceRepository.find(salon.id, { where: and(eq(services.id, serviceId), eq(services.salonId, salon.id), eq(services.active, true)), limit: 1 });
@@ -112,9 +123,8 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
 
     const openSlots = buildSlots({
       day: scheduledAt,
-      hours: hours.find((h) => h.dayOfWeek === scheduledAt.getDay()),
+      hours: hours.find((h) => h.dayOfWeek === salonWeekday(scheduledAt)),
       durationMin: svc[0].durationMin,
-      slotIntervalMin: salon.slotIntervalMin,
       staff: catalogue.staff.filter((s) => s.active),
       staffServiceMap: catalogue.staffServiceMap,
       serviceId,
@@ -124,6 +134,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
     });
     const match = openSlots.find((s) => new Date(s.time).getTime() === scheduledAt.getTime());
     if (!match) {
+      return fail("That time isn't available for booking. Please pick another slot.", 400);
+    }
+    if (!match.available) {
       return fail("That slot was just taken. Please choose another time.", 409);
     }
 
@@ -160,12 +173,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
       customerId: customer.id,
       type: "booking",
       title: "Appointment Confirmed 📅",
-      body: `${svc[0].name} on ${scheduledAt.toLocaleDateString("en-US", {
+      body: `${svc[0].name} on ${formatSalonDate(scheduledAt, {
         weekday: "long",
-      })} at ${scheduledAt.toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-      })}.\nWe've saved your chair at ${salon.name}.`,
+      })} at ${formatSalonTime(scheduledAt)}.\nWe've saved your chair at ${salon.name}.`,
       url: `/s/${salon.slug}/b/${booking.token}`,
     });
 

@@ -9,6 +9,7 @@ import { NotificationCard } from "@/components/notification-card";
 import { readProfile, writeProfile } from "@/lib/local-identity";
 import { ensurePushSubscription } from "@/lib/push-client";
 import { sinceLabel } from "@/lib/time";
+import { formatSalonDate, formatSalonTime } from "@/lib/salon-time";
 
 type Lookup = {
   customer: {
@@ -186,16 +187,13 @@ export function MyVisits({
                     >
                       <div className="flex-1">
                         <p className="text-[14px] font-medium">
-                          {new Date(b.scheduledAt).toLocaleDateString("en-US", {
+                          {formatSalonDate(new Date(b.scheduledAt), {
                             weekday: "short",
                             day: "numeric",
                             month: "short",
                           })}
                           {" · "}
-                          {new Date(b.scheduledAt).toLocaleTimeString("en-US", {
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })}
+                          {formatSalonTime(new Date(b.scheduledAt))}
                         </p>
                         <p className="text-[12.5px] text-muted">
                           {b.serviceName}

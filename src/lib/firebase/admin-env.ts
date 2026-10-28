@@ -9,11 +9,29 @@ export class FirebaseConfigurationError extends Error {
   }
 }
 
+/**
+ * Values pasted from a service-account JSON file or into a hosting dashboard
+ * often keep their surrounding quotes. Remove one matching pair.
+ */
+function unquote(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (trimmed && trimmed.length >= 2 && /^(["'])[\s\S]*\1$/.test(trimmed)) return trimmed.slice(1, -1).trim();
+  return trimmed;
+}
+
+/** Accepts real PEM line breaks, escaped \n (or \r\n) sequences and Windows line endings. */
+function normalizePrivateKey(value: string | undefined): string | undefined {
+  return unquote(value)
+    ?.replace(/\\r\\n|\\n/g, "\n")
+    .replace(/\r\n?/g, "\n")
+    .trim();
+}
+
 /** Validate only when Admin access is needed, with credential-safe errors. */
 export function getFirebaseAdminEnvironment() {
-  const projectId = process.env.FIREBASE_PROJECT_ID?.trim();
-  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL?.trim();
-  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
+  const projectId = unquote(process.env.FIREBASE_PROJECT_ID);
+  const clientEmail = unquote(process.env.FIREBASE_CLIENT_EMAIL);
+  const privateKey = normalizePrivateKey(process.env.FIREBASE_PRIVATE_KEY);
   const missing = [
     !projectId && "FIREBASE_PROJECT_ID",
     !clientEmail && "FIREBASE_CLIENT_EMAIL",
@@ -31,7 +49,7 @@ export function getFirebaseAdminEnvironment() {
   if (!/^[^\s@]+@[^\s@]+\.gserviceaccount\.com$/.test(clientEmail)) {
     throw new FirebaseConfigurationError("FIREBASE_CLIENT_EMAIL must be a service-account email address.");
   }
-  const webProjectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim();
+  const webProjectId = unquote(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID);
   if (webProjectId && webProjectId !== projectId) {
     throw new FirebaseConfigurationError("Firebase client and Admin project IDs must match.");
   }

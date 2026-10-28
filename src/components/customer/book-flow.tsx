@@ -1,20 +1,24 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SalonTopBar } from "@/components/customer/chrome";
 import { IconCheck } from "@/components/icons";
 import { api, cx, Spinner, toast, usePoll } from "@/components/ui";
 import { readProfile, writeProfile } from "@/lib/local-identity";
 import { ensurePushSubscription } from "@/lib/push-client";
+import { formatSalonDate, formatSalonTime } from "@/lib/salon-time";
 import type { PublicState } from "@/lib/public-types";
 
 type SlotsPayload = {
   days: { date: string; weekday: string; dayNum: number; month: string; closed: boolean }[];
   date: string;
-  slots: { time: string; label: string; staffIds: number[] }[];
+  slots: { time: string; label: string; staffIds: number[]; available: boolean }[];
   service: { id: number; name: string; durationMin: number; price: number };
 };
+
+/** How often open booking screens re-check the shared slot availability. */
+const SLOT_REFRESH_MS = 10000;
 
 export function BookFlow({ slug }: { slug: string }) {
   const router = useRouter();
@@ -46,23 +50,61 @@ export function BookFlow({ slug }: { slug: string }) {
     if (!serviceId && data?.services.length) setServiceId(data.services[0].id);
   }, [data, serviceId]);
 
+  // Latest values for the background refresh, which runs outside render.
+  const dateRef = useRef<string | null>(null);
+  const slotRef = useRef<string | null>(null);
+  const busyRef = useRef(false);
+  const loadingRef = useRef(false);
+  const requestSeq = useRef(0);
+  useEffect(() => {
+    dateRef.current = date;
+    slotRef.current = slot;
+    busyRef.current = busy;
+  }, [date, slot, busy]);
+
+  /**
+   * Loads slots from the server (the shared source of truth).
+   * `silent` is the background refresh: no skeleton, and the current
+   * selection is kept unless someone else has just booked it.
+   */
   const loadSlots = useCallback(
-    async (targetDate?: string) => {
+    async (targetDate?: string, silent = false) => {
       if (!serviceId) return;
-      setLoadingSlots(true);
+      // A visible load is already on its way; a background refresh would only race it.
+      if (silent && (loadingRef.current || busyRef.current)) return;
+      const seq = ++requestSeq.current;
+      if (!silent) {
+        loadingRef.current = true;
+        setLoadingSlots(true);
+      }
       try {
         const params = new URLSearchParams({ serviceId: String(serviceId) });
         if (staffId) params.set("staffId", String(staffId));
         if (targetDate) params.set("date", targetDate);
         const res = await fetch(`/api/public/${slug}/book?${params.toString()}`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as SlotsPayload;
+        // Ignore answers to requests that a newer one has replaced, and
+        // background answers that land while the customer is confirming.
+        if (seq !== requestSeq.current || (silent && busyRef.current)) return;
         setSlotData(json);
         setDate(json.date);
-        setSlot(null);
+        if (!silent) {
+          setSlot(null);
+        } else if (
+          slotRef.current &&
+          !json.slots.some((s) => s.time === slotRef.current && s.available)
+        ) {
+          setSlot(null);
+          toast("Someone just booked that time. Please pick another slot.", "err");
+        }
       } catch {
-        toast("Couldn't load available times. Check your connection.", "err");
+        if (!silent) toast("Couldn't load available times. Check your connection.", "err");
       } finally {
-        setLoadingSlots(false);
+        if (!silent && seq === requestSeq.current) {
+          loadingRef.current = false;
+          setLoadingSlots(false);
+        }
       }
     },
     [serviceId, staffId, slug],
@@ -72,6 +114,22 @@ export function BookFlow({ slug }: { slug: string }) {
     if (serviceId) loadSlots(date ?? undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serviceId, staffId]);
+
+  // Keep slots in step with bookings made on other devices.
+  useEffect(() => {
+    if (!serviceId) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") loadSlots(dateRef.current ?? undefined, true);
+    };
+    const id = setInterval(refresh, SLOT_REFRESH_MS);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [serviceId, loadSlots]);
 
   const service = useMemo(
     () => data?.services.find((s) => s.id === serviceId) ?? null,
@@ -86,6 +144,7 @@ export function BookFlow({ slug }: { slug: string }) {
     if (phone.replace(/\D/g, "").length < 7) return setError("Please add a valid phone number.");
 
     setBusy(true);
+    busyRef.current = true;
     try {
       const res = await api<{ token: string; customerId: number }>(`/api/public/${slug}/book`, {
         body: { name: name.trim(), phone: phone.trim(), serviceId, staffId, scheduledAt: slot },
@@ -236,21 +295,34 @@ export function BookFlow({ slug }: { slug: string }) {
             </div>
           ) : slotData && slotData.slots.length > 0 ? (
             <div className="grid grid-cols-4 gap-2 sm:grid-cols-5">
-              {slotData.slots.map((s) => (
-                <button
-                  key={s.time}
-                  onClick={() => setSlot(s.time)}
-                  className={cx(
-                    "num rounded-lg border py-2.5 text-[13px] font-medium transition-all",
-                    slot === s.time
-                      ? "border-transparent text-white"
-                      : "border-line bg-surface text-ink-2 hover:border-line-2",
-                  )}
-                  style={slot === s.time ? { background: "var(--brand)" } : undefined}
-                >
-                  {s.label}
-                </button>
-              ))}
+              {slotData.slots.map((s) =>
+                s.available ? (
+                  <button
+                    key={s.time}
+                    onClick={() => setSlot(s.time)}
+                    className={cx(
+                      "num rounded-lg border py-2.5 text-[13px] font-medium transition-all",
+                      slot === s.time
+                        ? "border-transparent text-white"
+                        : "border-line bg-surface text-ink-2 hover:border-line-2",
+                    )}
+                    style={slot === s.time ? { background: "var(--brand)" } : undefined}
+                  >
+                    {s.label}
+                  </button>
+                ) : (
+                  <button
+                    key={s.time}
+                    type="button"
+                    disabled
+                    aria-label={`${s.label}, booked`}
+                    className="num cursor-not-allowed rounded-lg border border-line bg-paper-2 py-1.5 text-[13px] font-medium leading-tight text-faint"
+                  >
+                    <span className="line-through">{s.label}</span>
+                    <span className="block text-[10.5px] font-normal">Booked</span>
+                  </button>
+                ),
+              )}
             </div>
           ) : (
             <div className="rounded-xl border border-line bg-surface px-4 py-6 text-center">
@@ -322,9 +394,9 @@ export function BookFlow({ slug }: { slug: string }) {
             {slot && service ? (
               <>
                 <p className="truncate text-[13px] font-medium">
-                  {new Date(slot).toLocaleDateString("en-US", { weekday: "long", day: "numeric", month: "short" })}
+                  {formatSalonDate(new Date(slot), { weekday: "long", day: "numeric", month: "short" })}
                   {" · "}
-                  {new Date(slot).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                  {formatSalonTime(new Date(slot))}
                 </p>
                 <p className="num text-[12px] text-muted">
                   {service.name} · {service.durationMin} min · ₹{service.price}

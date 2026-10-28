@@ -6,8 +6,8 @@ import { bookings, customers, services, staff } from "@/lib/firestore/fields";
 import { fail, num, ok, str, validPhone, withOwner } from "@/lib/api-helpers";
 import { newToken } from "@/lib/auth";
 import { dayBookings, getSalonById, pushNotification, upsertCustomer } from "@/lib/salon-data";
-import { isSlotTaken } from "@/lib/availability";
-import { endOfDay, startOfDay } from "@/lib/time";
+import { isOnSlotGrid, isSlotTaken } from "@/lib/availability";
+import { formatSalonDate, formatSalonTime, salonEndOfDay, salonStartOfDay } from "@/lib/salon-time";
 
 const selection = {
   id: bookings.id,
@@ -36,10 +36,10 @@ export async function GET(request: Request) {
 
     const base = [eq(bookings.salonId, user.salonId)];
     if (scope === "today") {
-      base.push(gte(bookings.scheduledAt, startOfDay(now)), lte(bookings.scheduledAt, endOfDay(now)));
+      base.push(gte(bookings.scheduledAt, salonStartOfDay(now)), lte(bookings.scheduledAt, salonEndOfDay(now)));
       base.push(inArray(bookings.status, ["confirmed", "arrived", "completed", "cancelled"]));
     } else if (scope === "upcoming") {
-      base.push(gte(bookings.scheduledAt, endOfDay(now)));
+      base.push(gte(bookings.scheduledAt, salonEndOfDay(now)));
       base.push(inArray(bookings.status, ["confirmed", "arrived"]));
     } else if (scope === "completed") {
       base.push(eq(bookings.status, "completed"));
@@ -59,12 +59,12 @@ export async function GET(request: Request) {
       counts: {
         today: counts.filter(
           (c) =>
-            c.scheduledAt >= startOfDay(now) &&
-            c.scheduledAt <= endOfDay(now) &&
+            c.scheduledAt >= salonStartOfDay(now) &&
+            c.scheduledAt <= salonEndOfDay(now) &&
             !["cancelled", "no_show"].includes(c.status),
         ).length,
         upcoming: counts.filter(
-          (c) => c.scheduledAt > endOfDay(now) && ["confirmed", "arrived"].includes(c.status),
+          (c) => c.scheduledAt > salonEndOfDay(now) && ["confirmed", "arrived"].includes(c.status),
         ).length,
         completed: counts.filter((c) => c.status === "completed").length,
         cancelled: counts.filter((c) => ["cancelled", "no_show"].includes(c.status)).length,
@@ -89,6 +89,7 @@ export async function POST(request: Request) {
 
     const scheduledAt = new Date(when);
     if (Number.isNaN(scheduledAt.getTime())) return fail("That date and time didn't look right.");
+    if (!isOnSlotGrid(scheduledAt)) return fail("Appointments start on the hour or half hour, like 4:00 or 4:30.");
 
     const salon = await getSalonById(user.salonId);
     if (!salon) return fail("Salon not found", 404);
@@ -126,12 +127,9 @@ export async function POST(request: Request) {
       customerId: customer.id,
       type: "booking",
       title: "Appointment Confirmed 📅",
-      body: `${svc[0].name} on ${scheduledAt.toLocaleDateString("en-US", {
+      body: `${svc[0].name} on ${formatSalonDate(scheduledAt, {
         weekday: "long",
-      })} at ${scheduledAt.toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-      })}.\nWe've saved your chair at ${salon.name}.`,
+      })} at ${formatSalonTime(scheduledAt)}.\nWe've saved your chair at ${salon.name}.`,
       url: `/s/${salon.slug}/b/${booking.token}`,
     });
 
