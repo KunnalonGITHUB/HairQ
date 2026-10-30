@@ -184,15 +184,43 @@ export const offerRepository=repository('offers');
 export const campaignRepository=repository('campaigns');
 export const notificationRepository=repository('notifications');
 
-/** Completion, history and financial totals commit together and are idempotent. */
-export async function completeVisit(salonId:number,source:'queueEntries'|'bookings',id:number) {
+/** An extra added at completion: a catalogue service, or a custom name and amount. */
+export type CompletionExtra = { serviceId: number } | { name: string; price: number };
+const MAX_EXTRA_PRICE = 1_000_000;
+
+/** Resolves extras to stored rows; catalogue prices always come from the salon's services. */
+async function resolveExtras(salonId:number,extras:CompletionExtra[]) {
+  if(extras.length>20)throw new RepositoryError("Add at most 20 extra services.",400);
+  const catalogue=(await readBucket('services',salonId)).rows;
+  return extras.map(extra=> {
+    if('serviceId' in extra) {
+      const service=catalogue.find(row=>row.id===extra.serviceId&&row.active);
+      if(!service)throw new RepositoryError("One of the added services isn't on your menu.",400);
+      return {serviceId:service.id,name:String(service.name),price:Number(service.price)};
+    }
+    const name=String(extra.name??'').trim();const price=Number(extra.price);
+    if(!name||name.length>80)throw new RepositoryError("Give each custom service a name (up to 80 characters).",400);
+    if(!Number.isSafeInteger(price)||price<0||price>MAX_EXTRA_PRICE)throw new RepositoryError("Enter a whole-rupee amount for each custom service.",400);
+    return {serviceId:null,name,price};
+  });
+}
+
+/**
+ * Completion, history and financial totals commit together and are idempotent:
+ * a record that is already completed returns null and adds no revenue.
+ * `extras` apply to bookings only and are added to the visit amount once.
+ */
+export async function completeVisit(salonId:number,source:'queueEntries'|'bookings',id:number,extras:CompletionExtra[]=[]) {
   return mutate(salonId,async()=> {
     const bucket=await readBucket(source,salonId);const entry=bucket.rows.find(row=>row.id===id);
     if(!entry)throw new RepositoryError("That record no longer exists.",404);
     if(entry.status==='completed')return null;
     if(source==='queueEntries'?!activeQueue(entry):!activeBooking(entry))throw new RepositoryError("That record has already ended.",409);
+    if(source!=='bookings'&&extras.length)throw new RepositoryError("Extra services can only be added to appointments.",400);
     const customers=await readBucket('customers',salonId);const customer=customers.rows.find(row=>row.id===entry.customerId)!;
-    const service=await reference('services',salonId,entry.serviceId);const amount=Number(service?.price??0);
+    const service=await reference('services',salonId,entry.serviceId);
+    const extraRows=await resolveExtras(salonId,extras);
+    const amount=Number(service?.price??0)+extraRows.reduce((sum,row)=>sum+row.price,0);
     const now=new Date();const started=entry.startedAt as Date|null;
     const waitMin=source==='bookings'?0:Math.max(0,Math.round(((started??now).getTime()-(entry.joinedAt as Date).getTime())/60000));
     const durationMin=source==='bookings'||!started?Number(entry.durationMin):Math.max(1,Math.round((now.getTime()-started.getTime())/60000));
@@ -210,6 +238,8 @@ export async function completeVisit(salonId:number,source:'queueEntries'|'bookin
     customer.lastVisitAt=now;customer.lastActivityAt=now;customer.lastServiceId=entry.serviceId;
     if(source==='queueEntries'&&entry.staffId!=null)customer.preferredStaffId=entry.staffId;
     entry.status='completed';if(source==='queueEntries')entry.completedAt=now;
+    // Keep what was charged on the appointment so the owner can review it later.
+    if(source==='bookings'){entry.extraServices=extraRows;entry.finalAmount=amount;}
     if(source==='queueEntries'||related!=null) {
       const queue=await readBucket('queueEntries',salonId);
       queue.rows.filter(activeQueue).sort((a,b)=>Number(a.position)-Number(b.position)||a.id-b.id).forEach((row,index)=>{row.position=index+1;});

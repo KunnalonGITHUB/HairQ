@@ -148,6 +148,17 @@ export interface Booking {
   source: string;
   notes: string | null;
   createdAt: Date;
+  /** Services added when the appointment was completed (null until then). */
+  extraServices: BookingExtraService[] | null;
+  /** Booked service price plus extras, recorded once at completion. */
+  finalAmount: number | null;
+}
+
+/** serviceId is null for a custom service typed in by the owner. */
+export interface BookingExtraService {
+  serviceId: number | null;
+  name: string;
+  price: number;
 }
 
 export interface Visit {

@@ -26,6 +26,8 @@ const selection = {
   serviceName: services.name,
   servicePrice: services.price,
   staffId: bookings.staffId,
+  extraServices: bookings.extraServices,
+  finalAmount: bookings.finalAmount,
 };
 
 export async function GET(request: Request) {

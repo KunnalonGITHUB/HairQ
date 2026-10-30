@@ -150,7 +150,7 @@ export function validateShape(table:EntityName,row:RecordRow) {
   for(const field of metadata[table]) {
     const v=row[field.name];
     if(v==null) {if(!field.nullable)throw new RepositoryError(`Missing ${field.name}.`,400);continue;}
-    const valid=field.kind==='timestamp'?v instanceof Date&&Number.isFinite(v.getTime()):field.kind==='integer'||field.kind==='serial'?typeof v==='number'&&Number.isSafeInteger(v):field.kind==='boolean'?typeof v==='boolean':typeof v==='string';
+    const valid=field.kind==='json'?Array.isArray(v)&&v.every(item=>item!==null&&typeof item==='object'):field.kind==='timestamp'?v instanceof Date&&Number.isFinite(v.getTime()):field.kind==='integer'||field.kind==='serial'?typeof v==='number'&&Number.isSafeInteger(v):field.kind==='boolean'?typeof v==='boolean':typeof v==='string';
     if(!valid)throw new RepositoryError(`Invalid ${field.name}.`,400);
   }
 }
