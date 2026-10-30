@@ -69,10 +69,61 @@ test('the bookings list, dashboard revenue and older records all work with the n
   const summary=h.load('src/app/api/owner/summary/route.ts');
   assert.equal((await (await summary.GET(new Request('https://hairq.example.invalid/api/owner/summary'))).json()).today.revenue,370);
 });
-test('queue completion is unchanged and refuses extras',async()=> {
-  const {h}=await setup();
-  const [entry]=await h.repo.queueRepository.create(1,{customerId:2,serviceId:1,staffId:1,token:'queue-1',position:1});
-  await assert.rejects(h.repo.completeVisit(1,'queueEntries',entry.id,[{name:'Tip',price:10}]),error=>error.status===400);
-  await h.repo.completeVisit(1,'queueEntries',entry.id);
-  assert.equal((await h.repo.visitRepository.list(1))[0].amount,250);
+/* ------------------------------------------------- live queue customers */
+
+async function queueSetup(status='serving') {
+  const ctx=await setup();
+  const [entry]=await ctx.h.repo.queueRepository.create(1,{customerId:2,serviceId:1,staffId:1,token:'queue-1',position:1});
+  if(status==='serving')await ctx.h.repo.queueRepository.update(1,ctx.h.query.eq(ctx.h.fields.queueEntries.id,entry.id),{status:'serving',startedAt:new Date(Date.now()-20*60000)});
+  const route=ctx.h.load('src/app/api/owner/queue/[id]/route.ts');
+  const complete=extraServices=>route.PATCH(new Request(`https://hairq.example.invalid/api/owner/queue/${entry.id}`,{method:'PATCH',body:JSON.stringify({action:'complete',...(extraServices?{extraServices}:{})})}),{params:Promise.resolve({id:String(entry.id)})});
+  const queueState=async()=>({
+    entry:(await ctx.h.repo.queueRepository.list(1)).find(q=>q.id===entry.id),
+    visits:await ctx.h.repo.visitRepository.list(1),
+    customer:(await ctx.h.repo.customerRepository.list(1)).find(c=>c.id===2),
+  });
+  return {...ctx,entry,complete,queueState};
+}
+test('live queue completion adds menu and custom services to one visit',async()=> {
+  const {complete,queueState}=await queueSetup();
+  assert.equal((await complete([{serviceId:2,price:1},{name:'Head Massage',price:50}])).status,200);
+  const {entry,visits,customer}=await queueState();
+  assert.equal(entry.status,'completed');assert.equal(entry.finalAmount,420);
+  assert.deepEqual(Array.from(entry.extraServices,x=>({...x})),[{serviceId:2,name:'Beard Trim',price:120},{serviceId:null,name:'Head Massage',price:50}]);
+  assert.equal(visits.length,1);assert.equal(visits[0].amount,420);assert.equal(visits[0].source,'queue');
+  assert.equal(customer.totalSpend,420);
+});
+test('live queue: waiting customers can be completed with extras; repeats add nothing',async()=> {
+  const {complete,queueState}=await queueSetup('waiting');
+  const [a,b]=await Promise.all([complete([{name:'Wash',price:100}]),complete([{name:'Wash',price:100}])]);
+  assert.deepEqual([a.status,b.status],[200,200]);
+  assert.equal((await complete([{name:'Wash',price:100}])).status,200);
+  const {visits,customer,entry}=await queueState();
+  assert.equal(visits.length,1);assert.equal(visits[0].amount,350);assert.equal(customer.totalSpend,350);assert.equal(entry.finalAmount,350);
+});
+test('live queue: invalid extras leave the customer in the queue with no revenue',async()=> {
+  const {complete,queueState}=await queueSetup('waiting');
+  assert.equal((await complete([{serviceId:3}])).status,400);
+  assert.equal((await complete([{name:'Tip',price:-1}])).status,400);
+  const {entry,visits}=await queueState();
+  assert.equal(entry.status,'waiting');assert.equal(entry.finalAmount,null);assert.equal(visits.length,0);
+});
+test('live queue completion without extras behaves as before',async()=> {
+  const {complete,queueState}=await queueSetup();
+  assert.equal((await complete()).status,200);
+  const {visits,entry}=await queueState();
+  assert.equal(visits[0].amount,250);assert.equal(entry.finalAmount,250);
+});
+test('an appointment moved to the queue is billed once and both records show the bill',async()=> {
+  const {h,booking}=await setup();
+  const bookingRoute=h.load('src/app/api/owner/bookings/[id]/route.ts');
+  const ctx={params:Promise.resolve({id:String(booking.id)})};
+  assert.equal((await bookingRoute.PATCH(new Request(`https://hairq.example.invalid/api/owner/bookings/${booking.id}`,{method:'PATCH',body:JSON.stringify({action:'add_to_queue'})}),ctx)).status,200);
+  const queued=(await h.repo.queueRepository.list(1)).find(q=>q.customerId===1);
+  const queueRoute=h.load('src/app/api/owner/queue/[id]/route.ts');
+  assert.equal((await queueRoute.PATCH(new Request(`https://hairq.example.invalid/api/owner/queue/${queued.id}`,{method:'PATCH',body:JSON.stringify({action:'complete',extraServices:[{name:'Head Massage',price:50}]})}),{params:Promise.resolve({id:String(queued.id)})})).status,200);
+  const visits=await h.repo.visitRepository.list(1);
+  assert.equal(visits.length,1);assert.equal(visits[0].amount,300);
+  const stored=(await h.repo.bookingRepository.list(1)).find(b=>b.id===booking.id);
+  assert.equal(stored.status,'completed');assert.equal(stored.finalAmount,300);assert.equal(stored.extraServices[0].name,'Head Massage');
 });

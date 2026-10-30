@@ -713,6 +713,18 @@ export const metadata = {
       "kind": "timestamp",
       "nullable": true,
       "now": false
+    },
+    {
+      "name": "extraServices",
+      "kind": "json",
+      "nullable": true,
+      "now": false
+    },
+    {
+      "name": "finalAmount",
+      "kind": "integer",
+      "nullable": true,
+      "now": false
     }
   ],
   "bookings": [

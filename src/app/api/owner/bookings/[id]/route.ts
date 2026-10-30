@@ -1,5 +1,5 @@
 import { requestJson } from "@/lib/api-helpers";
-import { bookingRepository, queueRepository, completeVisit, linkBookingQueue, type CompletionExtra } from "@/lib/firestore/repositories";
+import { bookingRepository, queueRepository, completeVisit, completionExtrasFrom, linkBookingQueue } from "@/lib/firestore/repositories";
 import { and, eq, inArray } from "@/lib/firestore/query";
 
 import { bookings, queueEntries } from "@/lib/firestore/fields";
@@ -86,17 +86,9 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
         break;
       }
       case "complete": {
-        // Optional extras: catalogue services by id (price looked up on the server)
+        // Optional extras: menu services by id (price looked up on the server)
         // or custom { name, price }. The total is computed in the transaction.
-        const raw = Array.isArray(body.extraServices) ? (body.extraServices as unknown[]) : [];
-        const extras: CompletionExtra[] = [];
-        for (const item of raw) {
-          const row = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
-          const serviceId = num(row.serviceId);
-          if (serviceId !== null) extras.push({ serviceId });
-          else extras.push({ name: str(row.name), price: num(row.price) ?? Number.NaN });
-        }
-        await completeVisit(user.salonId, "bookings", bookingId, extras);
+        await completeVisit(user.salonId, "bookings", bookingId, completionExtrasFrom(body.extraServices));
         break;
       }
       case "no_show": {

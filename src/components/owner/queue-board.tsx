@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { PageHead, StatTile } from "@/components/owner/shell";
+import { CompleteBillModal } from "@/components/owner/complete-bill";
 import {
   IconArrowDown,
   IconArrowUp,
@@ -55,6 +56,7 @@ export function QueueBoard({ openAdd }: { openAdd?: boolean }) {
   const { data, refresh } = usePoll<Payload>("/api/owner/queue", 5000);
   const [showAdd, setShowAdd] = useState(Boolean(openAdd));
   const [editing, setEditing] = useState<Entry | null>(null);
+  const [completing, setCompleting] = useState<Entry | null>(null);
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
@@ -193,10 +195,7 @@ export function QueueBoard({ openAdd }: { openAdd?: boolean }) {
                       <button className="btn btn-quiet btn-sm" onClick={() => setEditing(e)}>
                         Edit
                       </button>
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => act(e.id, { action: "complete" }, `${e.customerName} marked complete.`)}
-                      >
+                      <button className="btn btn-primary btn-sm" onClick={() => setCompleting(e)}>
                         <IconCheck width={14} height={14} />
                         Complete
                       </button>
@@ -326,6 +325,23 @@ export function QueueBoard({ openAdd }: { openAdd?: boolean }) {
           refresh();
         }}
       />
+
+      {completing ? (
+        <CompleteBillModal
+          key={completing.id}
+          customerName={completing.customerName}
+          serviceName={completing.serviceName}
+          servicePrice={completing.servicePrice}
+          services={data.services}
+          endpoint={`/api/owner/queue/${completing.id}`}
+          successMessage={`${completing.customerName} marked complete.`}
+          onClose={() => setCompleting(null)}
+          onDone={() => {
+            setCompleting(null);
+            refresh();
+          }}
+        />
+      ) : null}
     </>
   );
 }

@@ -1,5 +1,5 @@
 import { mutate } from "./firestore/store";
-import { queueRepository, completeVisit } from "@/lib/firestore/repositories";
+import { queueRepository, completeVisit, type CompletionExtra } from "@/lib/firestore/repositories";
 import { and, eq, inArray } from "@/lib/firestore/query";
 
 import { queueEntries } from "@/lib/firestore/fields";
@@ -35,8 +35,8 @@ export async function syncQueueNotifications(salonId: number, salonName: string,
   });
 }
 
-export async function recordCompletion(salonId: number, entryId: number) {
-  return completeVisit(salonId, "queueEntries", entryId);
+export async function recordCompletion(salonId: number, entryId: number, extras: CompletionExtra[] = []) {
+  return completeVisit(salonId, "queueEntries", entryId, extras);
 }
 
 /** Keeps positions dense (1..n) after removals so "move up/down" stays sane. */

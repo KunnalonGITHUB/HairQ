@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { PageHead } from "@/components/owner/shell";
+import { CompleteBillModal, rupees, type ExtraService } from "@/components/owner/complete-bill";
 import { IconCalendar, IconPlus } from "@/components/icons";
 import {
   api,
@@ -41,8 +42,6 @@ type Booking = {
   finalAmount: number | null;
 };
 
-/** serviceId is null for a custom service. */
-type ExtraService = { serviceId: number | null; name: string; price: number };
 
 type Payload = {
   bookings: Booking[];
@@ -233,16 +232,22 @@ export function BookingsView({ openAdd }: { openAdd?: boolean }) {
         }}
       />
 
-      <CompleteModal
-        key={completing?.id ?? "none"}
-        booking={completing}
-        services={(catalogue?.services ?? []).filter((s) => s.active !== false)}
-        onClose={() => setCompleting(null)}
-        onDone={() => {
-          setCompleting(null);
-          refresh();
-        }}
-      />
+      {completing ? (
+        <CompleteBillModal
+          key={completing.id}
+          customerName={`${completing.customerName}'s appointment`}
+          serviceName={completing.serviceName}
+          servicePrice={completing.servicePrice}
+          services={(catalogue?.services ?? []).filter((s) => s.active !== false)}
+          endpoint={`/api/owner/bookings/${completing.id}`}
+          successMessage="Appointment completed."
+          onClose={() => setCompleting(null)}
+          onDone={() => {
+            setCompleting(null);
+            refresh();
+          }}
+        />
+      ) : null}
 
       <RescheduleModal
         booking={reschedule}
@@ -433,159 +438,6 @@ function RescheduleModal({
       <Labeled label="New date & time">
         <input type="datetime-local" step={1800} className="field" value={when} onChange={(e) => setWhen(e.target.value)} />
       </Labeled>
-    </Modal>
-  );
-}
-
-function rupees(amount: number) {
-  return `₹${amount.toLocaleString("en-IN")}`;
-}
-
-/** Review the bill before completing: booked service, extras, and the final total. */
-function CompleteModal({
-  booking,
-  services,
-  onClose,
-  onDone,
-}: {
-  booking: Booking | null;
-  services: Catalogue["services"];
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const [extras, setExtras] = useState<ExtraService[]>([]);
-  const [pick, setPick] = useState("");
-  const [customName, setCustomName] = useState("");
-  const [customPrice, setCustomPrice] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  if (!booking) return null;
-
-  const total = booking.servicePrice + extras.reduce((sum, x) => sum + x.price, 0);
-
-  const addService = () => {
-    const service = services.find((s) => s.id === Number(pick));
-    if (!service) return;
-    setExtras((list) => [...list, { serviceId: service.id, name: service.name, price: service.price }]);
-    setPick("");
-  };
-
-  const addCustom = () => {
-    const name = customName.trim();
-    const price = Number(customPrice);
-    if (!name) return toast("Give the custom service a name.", "err");
-    if (customPrice.trim() === "" || !Number.isInteger(price) || price < 0) {
-      return toast("Enter a whole-rupee amount, like 150.", "err");
-    }
-    setExtras((list) => [...list, { serviceId: null, name, price }]);
-    setCustomName("");
-    setCustomPrice("");
-  };
-
-  const submit = async () => {
-    setBusy(true);
-    try {
-      await api(`/api/owner/bookings/${booking.id}`, {
-        method: "PATCH",
-        body: {
-          action: "complete",
-          // Catalogue prices are re-read on the server; only custom amounts are sent.
-          extraServices: extras.map((x) => (x.serviceId !== null ? { serviceId: x.serviceId } : { name: x.name, price: x.price })),
-        },
-      });
-      toast("Appointment completed.");
-      onDone();
-    } catch (err) {
-      toast(err instanceof Error ? err.message : "Couldn't complete it.", "err");
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      title={`Complete ${booking.customerName}'s appointment`}
-      description="Add anything else you did before saving the bill."
-      footer={
-        <>
-          <button className="btn btn-quiet" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="btn btn-primary" onClick={submit} disabled={busy}>
-            {busy ? <Spinner /> : null} Complete · {rupees(total)}
-          </button>
-        </>
-      }
-    >
-      <div className="space-y-4">
-        <div className="rounded-xl border border-line">
-          <div className="flex items-center justify-between px-3.5 py-2.5">
-            <span className="text-[13.5px]">
-              {booking.serviceName} <span className="text-muted">· booked</span>
-            </span>
-            <span className="num text-[13.5px] font-medium">{rupees(booking.servicePrice)}</span>
-          </div>
-          {extras.map((x, i) => (
-            <div key={i} className="flex items-center justify-between gap-3 border-t border-line px-3.5 py-2.5">
-              <span className="min-w-0 truncate text-[13.5px]">
-                {x.name} <span className="text-muted">· {x.serviceId === null ? "custom" : "added"}</span>
-              </span>
-              <span className="flex shrink-0 items-center gap-2">
-                <span className="num text-[13.5px] font-medium">{rupees(x.price)}</span>
-                <button
-                  className="btn btn-ghost btn-sm text-rose"
-                  onClick={() => setExtras((list) => list.filter((_, j) => j !== i))}
-                  aria-label={`Remove ${x.name}`}
-                >
-                  Remove
-                </button>
-              </span>
-            </div>
-          ))}
-          <div className="flex items-center justify-between border-t border-line bg-paper-2 px-3.5 py-2.5">
-            <span className="text-[13.5px] font-semibold">Total</span>
-            <span className="num text-[15px] font-semibold">{rupees(total)}</span>
-          </div>
-        </div>
-
-        <Labeled label="Add a service from your menu">
-          <div className="flex gap-2">
-            <select className="field" value={pick} onChange={(e) => setPick(e.target.value)}>
-              <option value="">Choose a service</option>
-              {services.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} · {rupees(s.price)}
-                </option>
-              ))}
-            </select>
-            <button className="btn btn-quiet" onClick={addService} disabled={!pick}>
-              Add
-            </button>
-          </div>
-        </Labeled>
-
-        <Labeled label="Or add a custom service">
-          <div className="flex gap-2">
-            <input
-              className="field min-w-0 flex-1"
-              placeholder="Service name"
-              value={customName}
-              onChange={(e) => setCustomName(e.target.value)}
-            />
-            <input
-              className="field w-28"
-              placeholder="₹ Amount"
-              inputMode="numeric"
-              value={customPrice}
-              onChange={(e) => setCustomPrice(e.target.value)}
-            />
-            <button className="btn btn-quiet" onClick={addCustom}>
-              Add
-            </button>
-          </div>
-        </Labeled>
-      </div>
     </Modal>
   );
 }

@@ -1,5 +1,5 @@
 import { requestJson } from "@/lib/api-helpers";
-import { queueRepository, serviceRepository } from "@/lib/firestore/repositories";
+import { completionExtrasFrom, queueRepository, serviceRepository } from "@/lib/firestore/repositories";
 import { and, eq, inArray } from "@/lib/firestore/query";
 
 import { queueEntries, services } from "@/lib/firestore/fields";
@@ -35,7 +35,8 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
         if (entry.status !== "serving") {
           await queueRepository.update(user.salonId, eq(queueEntries.id, entryId), { status: "serving", startedAt: entry.startedAt ?? new Date() });
         }
-        await recordCompletion(user.salonId, entryId);
+        // Optional extra services, validated and priced inside the completion transaction.
+        await recordCompletion(user.salonId, entryId, completionExtrasFrom(body.extraServices));
         await resequence(user.salonId);
         break;
       }

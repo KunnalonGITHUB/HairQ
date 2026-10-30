@@ -133,6 +133,10 @@ export interface QueueEntry {
   joinedAt: Date;
   startedAt: Date | null;
   completedAt: Date | null;
+  /** Services added when the customer was completed (null until then). */
+  extraServices: BookingExtraService[] | null;
+  /** Service price plus extras, recorded once at completion. */
+  finalAmount: number | null;
 }
 
 export interface Booking {

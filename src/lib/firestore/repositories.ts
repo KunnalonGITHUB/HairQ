@@ -188,6 +188,22 @@ export const notificationRepository=repository('notifications');
 export type CompletionExtra = { serviceId: number } | { name: string; price: number };
 const MAX_EXTRA_PRICE = 1_000_000;
 
+/**
+ * Reads `extraServices` from a request body: menu items by `serviceId`
+ * (the client price is ignored) or custom `{ name, price }`. Values are
+ * validated inside completeVisit's transaction.
+ */
+export function completionExtrasFrom(raw: unknown): CompletionExtra[] {
+  if(!Array.isArray(raw))return [];
+  return raw.map(item=> {
+    const row=(item&&typeof item==='object'?item:{}) as Record<string,unknown>;
+    const serviceId=row.serviceId===null||row.serviceId===undefined||row.serviceId===''?NaN:Number(row.serviceId);
+    if(Number.isFinite(serviceId))return {serviceId};
+    const price=row.price===null||row.price===undefined||row.price===''?NaN:Number(row.price);
+    return {name:typeof row.name==='string'?row.name.trim():'',price};
+  });
+}
+
 /** Resolves extras to stored rows; catalogue prices always come from the salon's services. */
 async function resolveExtras(salonId:number,extras:CompletionExtra[]) {
   if(extras.length>20)throw new RepositoryError("Add at most 20 extra services.",400);
@@ -208,7 +224,7 @@ async function resolveExtras(salonId:number,extras:CompletionExtra[]) {
 /**
  * Completion, history and financial totals commit together and are idempotent:
  * a record that is already completed returns null and adds no revenue.
- * `extras` apply to bookings only and are added to the visit amount once.
+ * `extras` (appointments and queue customers) are added to the visit amount once.
  */
 export async function completeVisit(salonId:number,source:'queueEntries'|'bookings',id:number,extras:CompletionExtra[]=[]) {
   return mutate(salonId,async()=> {
@@ -216,7 +232,6 @@ export async function completeVisit(salonId:number,source:'queueEntries'|'bookin
     if(!entry)throw new RepositoryError("That record no longer exists.",404);
     if(entry.status==='completed')return null;
     if(source==='queueEntries'?!activeQueue(entry):!activeBooking(entry))throw new RepositoryError("That record has already ended.",409);
-    if(source!=='bookings'&&extras.length)throw new RepositoryError("Extra services can only be added to appointments.",400);
     const customers=await readBucket('customers',salonId);const customer=customers.rows.find(row=>row.id===entry.customerId)!;
     const service=await reference('services',salonId,entry.serviceId);
     const extraRows=await resolveExtras(salonId,extras);
@@ -230,7 +245,7 @@ export async function completeVisit(salonId:number,source:'queueEntries'|'bookin
       const other=await readBucket(source==='queueEntries'?'bookings':'queueEntries',salonId);
       const record=other.rows.find(row=>row.id===related);
       if(record?.status==='completed') {entry.status='completed';if(source==='queueEntries')entry.completedAt=now;return null;}
-      if(record){record.status='completed';if(source==='bookings')record.completedAt=now;}
+      if(record){record.status='completed';if(source==='bookings')record.completedAt=now;record.extraServices=extraRows;record.finalAmount=amount;}
     }
     await visitRepository.create(salonId,{salonId,customerId:entry.customerId,serviceId:entry.serviceId,staffId:entry.staffId,source:source==='bookings'?'booking':entry.source==='walk_in'?'walk_in':'queue',amount,durationMin,waitMin,completedAt:now});
     customer.totalVisits=Number(customer.totalVisits)+1;customer.totalSpend=Number(customer.totalSpend)+amount;
@@ -238,8 +253,8 @@ export async function completeVisit(salonId:number,source:'queueEntries'|'bookin
     customer.lastVisitAt=now;customer.lastActivityAt=now;customer.lastServiceId=entry.serviceId;
     if(source==='queueEntries'&&entry.staffId!=null)customer.preferredStaffId=entry.staffId;
     entry.status='completed';if(source==='queueEntries')entry.completedAt=now;
-    // Keep what was charged on the appointment so the owner can review it later.
-    if(source==='bookings'){entry.extraServices=extraRows;entry.finalAmount=amount;}
+    // Keep what was charged so the owner can review it later.
+    entry.extraServices=extraRows;entry.finalAmount=amount;
     if(source==='queueEntries'||related!=null) {
       const queue=await readBucket('queueEntries',salonId);
       queue.rows.filter(activeQueue).sort((a,b)=>Number(a.position)-Number(b.position)||a.id-b.id).forEach((row,index)=>{row.position=index+1;});
