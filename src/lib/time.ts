@@ -1,3 +1,5 @@
+import { salonClock } from "./salon-time";
+
 export const DAY_NAMES = [
   "Sunday",
   "Monday",
@@ -28,8 +30,9 @@ export function minutesToLabel(mins: number): string {
   return `${h}:${String(m).padStart(2, "0")} ${suffix}`;
 }
 
+/** "4:30 PM" on the salon's clock, whatever timezone the server or browser runs in. */
 export function clockLabel(date: Date): string {
-  return minutesToLabel(date.getHours() * 60 + date.getMinutes());
+  return minutesToLabel(salonClock(date).minutesOfDay);
 }
 
 export function dateKey(date: Date): string {

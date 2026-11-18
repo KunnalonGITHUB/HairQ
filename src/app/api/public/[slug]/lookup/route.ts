@@ -1,11 +1,11 @@
 import { publicSubscription } from "@/lib/firestore/public-dto";
 import { requestJson } from "@/lib/api-helpers";
-import { customerRepository, visitRepository, bookingRepository, queueRepository, serviceRepository, staffRepository, pushSubscriptionRepository } from "@/lib/firestore/repositories";
+import { visitRepository, bookingRepository, queueRepository, serviceRepository, staffRepository, pushSubscriptionRepository } from "@/lib/firestore/repositories";
 import { and, desc, eq, gte, inArray } from "@/lib/firestore/query";
 
-import { bookings, customers, pushSubscriptions, queueEntries, services, staff, visits } from "@/lib/firestore/fields";
+import { bookings, pushSubscriptions, queueEntries, services, staff, visits } from "@/lib/firestore/fields";
 import { fail, guarded, ok, str, validPhone } from "@/lib/api-helpers";
-import { getSalonBySlug } from "@/lib/salon-data";
+import { findCustomerByPhone, getSalonBySlug } from "@/lib/salon-data";
 
 export async function POST(request: Request, ctx: { params: Promise<{ slug: string }> }) {
   return guarded(async () => {
@@ -17,8 +17,8 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
     const phone = str(body.phone).replace(/[^\d+]/g, "");
     if (!validPhone(phone)) return fail("Enter the phone number you used at the salon.");
 
-    const rows = await customerRepository.find(salon.id, { where: and(eq(customers.salonId, salon.id), eq(customers.phone, phone)), limit: 1 });
-    const customer = rows[0];
+    // "+91 98…", "098…" and "98…" all find the same customer.
+    const customer = await findCustomerByPhone(salon.id, phone);
     if (!customer) {
       return fail("We couldn't find a visit with that number yet.", 404);
     }

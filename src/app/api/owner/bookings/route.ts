@@ -1,6 +1,6 @@
 import { requestJson } from "@/lib/api-helpers";
 import { bookingRepository, staffRepository, serviceRepository } from "@/lib/firestore/repositories";
-import { and, asc, desc, eq, gte, inArray, lte } from "@/lib/firestore/query";
+import { and, asc, coalesce, desc, eq, gte, inArray, lte } from "@/lib/firestore/query";
 
 import { bookings, customers, services, staff } from "@/lib/firestore/fields";
 import { fail, num, ok, str, validPhone, withOwner } from "@/lib/api-helpers";
@@ -24,7 +24,8 @@ const selection = {
   totalVisits: customers.totalVisits,
   serviceId: services.id,
   serviceName: services.name,
-  servicePrice: services.price,
+  // The price locked at booking; older bookings fall back to the menu.
+  servicePrice: coalesce(bookings.servicePrice, services.price),
   staffId: bookings.staffId,
   extraServices: bookings.extraServices,
   finalAmount: bookings.finalAmount,
@@ -120,6 +121,7 @@ export async function POST(request: Request) {
         token: newToken(10),
         scheduledAt,
         durationMin: svc[0].durationMin,
+        servicePrice: svc[0].price,
         source: "manual",
         notes: str(body.notes) || null,
       });

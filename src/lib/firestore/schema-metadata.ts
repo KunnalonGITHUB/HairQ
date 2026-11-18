@@ -725,6 +725,12 @@ export const metadata = {
       "kind": "integer",
       "nullable": true,
       "now": false
+    },
+    {
+      "name": "servicePrice",
+      "kind": "integer",
+      "nullable": true,
+      "now": false
     }
   ],
   "bookings": [
@@ -814,6 +820,12 @@ export const metadata = {
       "kind": "integer",
       "nullable": true,
       "now": false
+    },
+    {
+      "name": "servicePrice",
+      "kind": "integer",
+      "nullable": true,
+      "now": false
     }
   ],
   "visits": [
@@ -880,6 +892,18 @@ export const metadata = {
       "kind": "timestamp",
       "nullable": false,
       "now": true
+    },
+    {
+      "name": "serviceAmount",
+      "kind": "integer",
+      "nullable": true,
+      "now": false
+    },
+    {
+      "name": "extraServices",
+      "kind": "json",
+      "nullable": true,
+      "now": false
     }
   ],
   "offers": [

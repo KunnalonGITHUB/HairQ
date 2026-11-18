@@ -4,15 +4,25 @@ import { and, asc, eq, gte, inArray, lte } from "@/lib/firestore/query";
 import { bookings, customers, services, staff, visits } from "@/lib/firestore/fields";
 import { fail, ok, withOwner } from "@/lib/api-helpers";
 import { getSalonById, loadLiveQueue } from "@/lib/salon-data";
-import { addDays, dateKey, startOfDay } from "@/lib/time";
-import { salonEndOfDay, salonStartOfDay } from "@/lib/salon-time";
+import {
+  addDaysToKey,
+  formatSalonDate,
+  salonClock,
+  salonDateKey,
+  salonDayStart,
+  salonEndOfDay,
+  salonStartOfDay,
+  salonWeekday,
+} from "@/lib/salon-time";
 
 export async function GET(request: Request) {
   return withOwner(async (user) => {
     const url = new URL(request.url);
     const days = Math.max(7, Math.min(90, Number(url.searchParams.get("days") ?? 30)));
     const now = new Date();
-    const rangeStart = startOfDay(addDays(now, -(days - 1)));
+    // Days, hours and weekdays are the salon's (Asia/Kolkata), not the server's.
+    const rangeStartKey = addDaysToKey(salonDateKey(now), -(days - 1));
+    const rangeStart = salonDayStart(rangeStartKey);
 
     const salon = await getSalonById(user.salonId);
     if (!salon) return fail("Salon not found", 404);
@@ -51,47 +61,56 @@ export async function GET(request: Request) {
 
     const serviceNames = new Map(svc.map((s) => [s.id, s.name]));
     const staffNames = new Map(team.map((s) => [s.id, s.name]));
-    const todayStart = startOfDay(now).getTime();
+    const todayStart = salonStartOfDay(now).getTime();
     const todayVisits = rangeVisits.filter((v) => v.completedAt.getTime() >= todayStart);
 
-    // --- series: visits per day across the range
+    // --- series: visits per salon day across the range
     const series = Array.from({ length: days }, (_, i) => {
-      const day = addDays(rangeStart, i);
-      const key = dateKey(day);
-      const dayVisits = rangeVisits.filter((v) => dateKey(v.completedAt) === key);
+      const key = addDaysToKey(rangeStartKey, i);
+      const day = salonDayStart(key);
+      const dayVisits = rangeVisits.filter((v) => salonDateKey(v.completedAt) === key);
       return {
         date: key,
-        label: day.toLocaleDateString("en-US", { day: "numeric", month: "short" }),
-        weekday: day.getDay(),
+        label: formatSalonDate(day, { day: "numeric", month: "short" }),
+        weekday: salonWeekday(day),
         customers: dayVisits.length,
         revenue: dayVisits.reduce((s, v) => s + v.amount, 0),
       };
     });
 
-    // --- busy hours (visits bucketed by hour of completion)
+    // --- busy hours (visits bucketed by salon hour of completion)
     const hourBuckets = Array.from({ length: 14 }, (_, i) => ({ hour: i + 9, count: 0 }));
     for (const v of rangeVisits) {
-      const h = v.completedAt.getHours();
+      const h = salonClock(v.completedAt).hour;
       const bucket = hourBuckets.find((b) => b.hour === h);
       if (bucket) bucket.count += 1;
     }
 
     const weekdayTally = Array.from({ length: 7 }, (_, d) => ({
       day: d,
-      count: rangeVisits.filter((v) => v.completedAt.getDay() === d).length,
+      count: rangeVisits.filter((v) => salonWeekday(v.completedAt) === d).length,
     }));
 
-    const serviceTally = new Map<number, { name: string; count: number; revenue: number }>();
-    for (const v of rangeVisits) {
-      if (!v.serviceId) continue;
-      const entry = serviceTally.get(v.serviceId) ?? {
-        name: serviceNames.get(v.serviceId) ?? "Service",
-        count: 0,
-        revenue: 0,
-      };
+    // Each visit credits its main service with that service's price and each
+    // extra with its own price. Older visits (no breakdown) credit the whole
+    // amount to the main service, as before.
+    const serviceTally = new Map<string, { name: string; count: number; revenue: number }>();
+    const credit = (key: string, name: string, revenue: number) => {
+      const entry = serviceTally.get(key) ?? { name, count: 0, revenue: 0 };
       entry.count += 1;
-      entry.revenue += v.amount;
-      serviceTally.set(v.serviceId, entry);
+      entry.revenue += revenue;
+      serviceTally.set(key, entry);
+    };
+    for (const v of rangeVisits) {
+      const extras = v.extraServices ?? [];
+      const extrasTotal = extras.reduce((s, x) => s + x.price, 0);
+      if (v.serviceId) {
+        credit(`service:${v.serviceId}`, serviceNames.get(v.serviceId) ?? "Service", v.serviceAmount ?? v.amount - extrasTotal);
+      }
+      for (const x of extras) {
+        if (x.serviceId) credit(`service:${x.serviceId}`, serviceNames.get(x.serviceId) ?? x.name, x.price);
+        else credit(`custom:${x.name.trim().toLowerCase()}`, x.name, x.price);
+      }
     }
 
     const staffTally = new Map<number, { name: string; count: number; revenue: number }>();

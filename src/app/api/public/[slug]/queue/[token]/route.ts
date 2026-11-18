@@ -108,7 +108,8 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ slug: str
     const svc = await serviceRepository.find(salon.id, { where: and(eq(services.id, serviceId), eq(services.salonId, salon.id), eq(services.active, true)), limit: 1 });
     if (!svc[0]) return fail("That service isn't available right now.");
 
-    await queueRepository.update(salon.id, eq(queueEntries.id, row.id), { serviceId, durationMin: svc[0].durationMin, staffId: num(body.staffId) ?? row.staffId });
+    // Switching service locks the new service's current price.
+    await queueRepository.update(salon.id, eq(queueEntries.id, row.id), { serviceId, durationMin: svc[0].durationMin, servicePrice: svc[0].price, staffId: num(body.staffId) ?? row.staffId });
 
     await syncQueueNotifications(salon.id, salon.name, salon.slug);
     return ok({ ok: true });

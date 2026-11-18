@@ -15,6 +15,7 @@ import { cx, usePoll } from "@/components/ui";
 import { readProfile } from "@/lib/local-identity";
 import type { PublicState, TicketState } from "@/lib/public-types";
 import { DAY_NAMES, humanDuration, minutesToLabel, toMinutes } from "@/lib/time";
+import { salonWeekday } from "@/lib/salon-time";
 
 function money(amount: number, currency: string) {
   const symbol = currency === "INR" ? "₹" : currency === "USD" ? "$" : "";
@@ -313,7 +314,7 @@ export function SalonHome({ slug }: { slug: string }) {
           <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">Opening hours</h2>
           <div className="mt-3 rounded-xl border border-line bg-surface px-3.5 py-1">
             {data.hours.map((h) => {
-              const today = new Date(data.now).getDay() === h.dayOfWeek;
+              const today = salonWeekday(new Date(data.now)) === h.dayOfWeek;
               return (
                 <div
                   key={h.dayOfWeek}

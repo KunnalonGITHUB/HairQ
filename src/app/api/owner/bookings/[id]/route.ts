@@ -1,14 +1,14 @@
 import { requestJson } from "@/lib/api-helpers";
-import { bookingRepository, queueRepository, completeVisit, completionExtrasFrom, linkBookingQueue } from "@/lib/firestore/repositories";
+import { bookingRepository, queueRepository, serviceRepository, completeVisit, completionExtrasFrom, endLinkedQueueEntry, linkBookingQueue } from "@/lib/firestore/repositories";
 import { and, eq, inArray } from "@/lib/firestore/query";
 
-import { bookings, queueEntries } from "@/lib/firestore/fields";
+import { bookings, queueEntries, services } from "@/lib/firestore/fields";
 import { fail, num, ok, str, withOwner } from "@/lib/api-helpers";
 import { newToken } from "@/lib/auth";
 import { getSalonById, nextQueuePosition, pushNotification } from "@/lib/salon-data";
 import { syncQueueNotifications } from "@/lib/queue-actions";
 import { isOnSlotGrid } from "@/lib/availability";
-import { formatSalonDate, formatSalonTime } from "@/lib/salon-time";
+import { formatSalonDate, formatSalonTime, salonDateKey } from "@/lib/salon-time";
 
 export async function PATCH(request: Request, ctx: { params: Promise<{ id: string }> }) {
   return withOwner(async (user) => {
@@ -32,6 +32,10 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
         await bookingRepository.update(user.salonId, eq(bookings.id, bookingId), { status: "arrived" });
         break;
       case "cancel": {
+        // A cancelled appointment also leaves the live queue if it was moved there.
+        if (await endLinkedQueueEntry(user.salonId, bookingId, "cancelled")) {
+          await syncQueueNotifications(user.salonId, salon.name, salon.slug);
+        }
         await bookingRepository.update(user.salonId, eq(bookings.id, bookingId), { status: "cancelled" });
         await pushNotification({
           salonId: user.salonId,
@@ -70,6 +74,8 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
             ), limit: 1 });
         if (already.length > 0) return fail("This customer is already in the live queue.", 409);
         const position = await nextQueuePosition(user.salonId);
+        // Carry the booked price into the queue; older bookings use today's menu price.
+        const menu = await serviceRepository.find(user.salonId, { select: { price: services.price }, where: eq(services.id, booking.serviceId), limit: 1 });
         const [queueEntry] = await queueRepository.create(user.salonId, {
           salonId: user.salonId,
           customerId: booking.customerId,
@@ -77,6 +83,7 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
           staffId: booking.staffId,
           token: newToken(10),
           durationMin: booking.durationMin,
+          servicePrice: booking.servicePrice ?? menu[0]?.price ?? null,
           source: "booking",
           position,
         });
@@ -86,12 +93,20 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
         break;
       }
       case "complete": {
+        // Revenue belongs to the day the service happens. A customer who comes in
+        // before their appointment day goes through the live queue instead.
+        if (booking.status !== "completed" && salonDateKey(booking.scheduledAt) > salonDateKey(new Date())) {
+          return fail("This appointment is for a later day. If they've come in early, use “To queue” to serve them now.", 409);
+        }
         // Optional extras: menu services by id (price looked up on the server)
         // or custom { name, price }. The total is computed in the transaction.
         await completeVisit(user.salonId, "bookings", bookingId, completionExtrasFrom(body.extraServices));
         break;
       }
       case "no_show": {
+        if (await endLinkedQueueEntry(user.salonId, bookingId, "no_show")) {
+          await syncQueueNotifications(user.salonId, salon.name, salon.slug);
+        }
         await bookingRepository.update(user.salonId, eq(bookings.id, bookingId), { status: "no_show" });
         break;
       }

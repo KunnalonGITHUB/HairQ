@@ -2,6 +2,7 @@ import "server-only";
 import type { EntityMap, EntityName } from "./entities";
 import { compareRows, type Expression, type Ordering, type RowContext, type Selected, type Selection, value } from "./query";
 import { assertSalonId, currentSalonId, defaults, listRows, mutate, nextId, readBucket, RepositoryError, rootSalons, validateShape, type RecordRow } from "./store";
+import { samePhone } from "../phone";
 
 interface FindOptions<S extends Selection | undefined = undefined> {
   select?: S;
@@ -26,7 +27,11 @@ async function validateRelationships(table:EntityName,salonId:number,row:RecordR
   validateShape(table,row);
   if(table==='customers') {
     if(!String(row.phone).replace(/\D/g,''))throw new RepositoryError("Add a valid phone number.",400);
-    const duplicate=(await readBucket(table,salonId)).rows.some(item=>item.id!==row.id&&item.phone===row.phone);
+    const others=(await readBucket(table,salonId)).rows.filter(item=>item.id!==row.id);
+    // New numbers are compared however they were typed ("+91…" vs "98…"). Unchanged
+    // numbers keep the exact check, so legacy duplicate records stay editable.
+    const phoneChanged=!old||old.phone!==row.phone;
+    const duplicate=others.some(item=>item.phone===row.phone||(phoneChanged&&samePhone(String(item.phone),String(row.phone))));
     if(duplicate)throw new RepositoryError("A customer with that phone number already exists.",409);
     if(row.preferredStaffId!=null)await reference('staff',salonId,row.preferredStaffId);
     if(row.lastServiceId!=null)await reference('services',salonId,row.lastServiceId);
@@ -67,7 +72,8 @@ async function validateRelationships(table:EntityName,salonId:number,row:RecordR
       if(old&&!activeQueue(old)&&row.status!==old.status)throw new RepositoryError("That queue entry has already ended.",409);
       if(!old&&activeQueue(row)) {
         const salon=(await readBucket('salons',salonId)).rows[0];
-        if(siblings.filter(activeQueue).length>=Number(salon.maxQueueSize))throw new RepositoryError("The queue is full right now. Please try again soon.",409);
+        // Capacity counts the waiting line, as the owner's "Cap" tile and the join screen do.
+        if(row.status==='waiting'&&siblings.filter(item=>item.status==='waiting').length>=Number(salon.maxQueueSize))throw new RepositoryError("The queue is full right now. Please try again soon.",409);
         if(siblings.some(item=>activeQueue(item)&&item.customerId===row.customerId))throw new RepositoryError("This customer is already in the live queue.",409);
         row.position=Math.max(0,...siblings.filter(activeQueue).map(item=>Number(item.position)))+1;
       }
@@ -235,21 +241,37 @@ export async function completeVisit(salonId:number,source:'queueEntries'|'bookin
     const customers=await readBucket('customers',salonId);const customer=customers.rows.find(row=>row.id===entry.customerId)!;
     const service=await reference('services',salonId,entry.serviceId);
     const extraRows=await resolveExtras(salonId,extras);
-    const amount=Number(service?.price??0)+extraRows.reduce((sum,row)=>sum+row.price,0);
+    // The price locked when they booked or joined; records made before price locking use the menu.
+    const serviceAmount=Number(entry.servicePrice??service?.price??0);
+    const amount=serviceAmount+extraRows.reduce((sum,row)=>sum+row.price,0);
     const now=new Date();const started=entry.startedAt as Date|null;
-    const waitMin=source==='bookings'?0:Math.max(0,Math.round(((started??now).getTime()-(entry.joinedAt as Date).getTime())/60000));
-    const durationMin=source==='bookings'||!started?Number(entry.durationMin):Math.max(1,Math.round((now.getTime()-started.getTime())/60000));
+    const bookedMin=Number(entry.durationMin);
+    // Completed straight from the waiting line: there is no measured start, so the
+    // service is taken to have run its booked length (not a 1-minute visit).
+    // (Bookings have no joinedAt; appointments record no wait.)
+    let waitMin=0;
+    if(source==='queueEntries') {
+      const joined=(entry.joinedAt as Date).getTime();
+      const effectiveStart=started?started.getTime():Math.max(joined,now.getTime()-bookedMin*60000);
+      waitMin=Math.max(0,Math.round((effectiveStart-joined)/60000));
+    }
+    const durationMin=source==='bookings'||!started?bookedMin:Math.max(1,Math.round((now.getTime()-started.getTime())/60000));
     // A booking moved to the queue is one visit, whichever surface completes it.
     const related=source==='queueEntries'?entry.bookingId:entry.queueId;
     if(related!=null) {
       const other=await readBucket(source==='queueEntries'?'bookings':'queueEntries',salonId);
       const record=other.rows.find(row=>row.id===related);
       if(record?.status==='completed') {entry.status='completed';if(source==='queueEntries')entry.completedAt=now;return null;}
-      if(record){record.status='completed';if(source==='bookings')record.completedAt=now;record.extraServices=extraRows;record.finalAmount=amount;}
+      // Only a still-active partner is closed with this bill. A cancelled, skipped
+      // or no-show partner keeps its status rather than being turned into a sale.
+      if(record&&(source==='queueEntries'?activeBooking(record):activeQueue(record))){record.status='completed';if(source==='bookings')record.completedAt=now;record.extraServices=extraRows;record.finalAmount=amount;}
     }
-    await visitRepository.create(salonId,{salonId,customerId:entry.customerId,serviceId:entry.serviceId,staffId:entry.staffId,source:source==='bookings'?'booking':entry.source==='walk_in'?'walk_in':'queue',amount,durationMin,waitMin,completedAt:now});
+    // An appointment moved into the queue is still a booking visit.
+    const visitSource=source==='bookings'||entry.source==='booking'?'booking':entry.source==='walk_in'?'walk_in':'queue';
+    await visitRepository.create(salonId,{salonId,customerId:entry.customerId,serviceId:entry.serviceId,staffId:entry.staffId,source:visitSource,amount,serviceAmount,extraServices:extraRows,durationMin,waitMin,completedAt:now});
     customer.totalVisits=Number(customer.totalVisits)+1;customer.totalSpend=Number(customer.totalSpend)+amount;
-    customer.loyaltyPoints=Number(customer.loyaltyPoints)+Math.max(1,Math.round(amount/50));
+    // A free (₹0) visit earns no points; any paid visit earns at least one.
+    customer.loyaltyPoints=Number(customer.loyaltyPoints)+(amount>0?Math.max(1,Math.round(amount/50)):0);
     customer.lastVisitAt=now;customer.lastActivityAt=now;customer.lastServiceId=entry.serviceId;
     if(source==='queueEntries'&&entry.staffId!=null)customer.preferredStaffId=entry.staffId;
     entry.status='completed';if(source==='queueEntries')entry.completedAt=now;
@@ -267,6 +289,25 @@ export async function linkBookingQueue(salonId:number,bookingId:number,queueId:n
   const booking=await reference('bookings',salonId,bookingId);const queue=await reference('queueEntries',salonId,queueId);
   if(!booking||!queue||booking.customerId!==queue.customerId)throw new RepositoryError("Invalid booking queue relationship.",400);
   booking.queueId=queueId;queue.bookingId=bookingId;
+  });
+}
+/**
+ * When an appointment is cancelled or marked no-show, the live-queue entry made
+ * from it ("To queue") must not stay in line. A waiting entry ends with the same
+ * status; a customer already in the chair is refused so the bill isn't lost.
+ * Returns true when a queue entry was ended.
+ */
+export async function endLinkedQueueEntry(salonId:number,bookingId:number,status:'cancelled'|'no_show',servingMessage="This customer is already in the chair. Complete or remove them from the live queue first.") {
+  return mutate(salonId,async()=> {
+    const booking=(await readBucket('bookings',salonId)).rows.find(row=>row.id===bookingId);
+    if(booking?.queueId==null)return false;
+    const queue=await readBucket('queueEntries',salonId);
+    const entry=queue.rows.find(row=>row.id===booking.queueId);
+    if(!entry||!activeQueue(entry))return false;
+    if(entry.status==='serving')throw new RepositoryError(servingMessage,409);
+    entry.status=status;entry.completedAt=new Date();
+    queue.rows.filter(activeQueue).sort((a,b)=>Number(a.position)-Number(b.position)||a.id-b.id).forEach((row,index)=>{row.position=index+1;});
+    return true;
   });
 }
 export function authenticatedTenant():number {return currentSalonId();}

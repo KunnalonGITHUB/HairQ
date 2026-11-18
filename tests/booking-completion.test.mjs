@@ -6,7 +6,9 @@ import {fixture} from "./support/firestore-harness.mjs";
 async function setup() {
   const h=await fixture();
   await h.repo.serviceRepository.create(1,[{name:'Beard Trim',price:120,durationMin:15},{name:'Old colour',price:900,durationMin:60,active:false}]);
-  const [booking]=await h.repo.bookingRepository.create(1,{customerId:1,serviceId:1,staffId:1,token:'complete-me',scheduledAt:new Date('2030-01-02T11:00:00Z')});
+  // Earlier today on the salon clock: appointments are completed on their own day.
+  const {salonDateKey,salonTimeOnDay}=h.load('src/lib/salon-time.ts');
+  const [booking]=await h.repo.bookingRepository.create(1,{customerId:1,serviceId:1,staffId:1,token:'complete-me',scheduledAt:salonTimeOnDay(salonDateKey(new Date()),60)});
   const route=h.load('src/app/api/owner/bookings/[id]/route.ts');
   const complete=(extraServices,id=booking.id)=>route.PATCH(new Request(`https://hairq.example.invalid/api/owner/bookings/${id}`,{method:'PATCH',body:JSON.stringify({action:'complete',...(extraServices?{extraServices}:{})})}),{params:Promise.resolve({id:String(id)})});
   const state=async()=>({

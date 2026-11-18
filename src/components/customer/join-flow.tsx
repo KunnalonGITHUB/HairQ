@@ -72,7 +72,9 @@ export function JoinFlow({ slug }: { slug: string }) {
     try {
       const res = await api<{ token: string; customerId?: number; alreadyInQueue?: boolean }>(
         `/api/public/${slug}/queue`,
-        { body: { name: name.trim(), phone: phone.trim(), serviceId, staffId } },
+        // The ticket this phone already holds, if any; the server only returns an
+        // existing place in line to the device that owns it.
+        { body: { name: name.trim(), phone: phone.trim(), serviceId, staffId, ticket: readProfile(slug).ticket ?? null } },
       );
       writeProfile(slug, {
         name: name.trim(),

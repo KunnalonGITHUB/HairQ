@@ -1,6 +1,6 @@
 import { mutate } from "./firestore/store";
 import { salonRepository, workingHoursRepository, queueRepository, staffRepository, serviceRepository, staffServiceRepository, offerRepository, customerRepository, pushSubscriptionRepository, notificationRepository, bookingRepository } from "@/lib/firestore/repositories";
-import { and, desc, eq, gte, inArray, lte, ne, maximum } from "@/lib/firestore/query";
+import { and, coalesce, desc, eq, gte, inArray, lte, ne, maximum, type Expression } from "@/lib/firestore/query";
 
 import {
   bookings,
@@ -17,8 +17,9 @@ import {
 } from "@/lib/firestore/fields";
 import { projectQueue, type EngineEntry } from "./queue-engine";
 import { clockLabel, toMinutes } from "./time";
-import { salonEndOfDay, salonStartOfDay } from "./salon-time";
+import { salonClock, salonEndOfDay, salonStartOfDay } from "./salon-time";
 import { sendPushToCustomers } from "./web-push";
+import { canonicalPhone, samePhone } from "./phone";
 
 export async function getSalonBySlug(slug: string) {
   const rows = await salonRepository.find(null, { where: eq(salons.slug, slug), limit: 1 });
@@ -38,9 +39,11 @@ export function openStatus(
   hours: { dayOfWeek: number; isClosed: boolean; openTime: string; closeTime: string }[],
   now = new Date(),
 ) {
-  const today = hours.find((h) => h.dayOfWeek === now.getDay());
+  // The salon's own day and time, not the server's (Vercel runs in UTC).
+  const clock = salonClock(now);
+  const today = hours.find((h) => h.dayOfWeek === clock.weekday);
   if (!today || today.isClosed) return { open: false, label: "Closed today", today: today ?? null };
-  const mins = now.getHours() * 60 + now.getMinutes();
+  const mins = clock.minutesOfDay;
   const open = toMinutes(today.openTime) ?? 0;
   const close = toMinutes(today.closeTime) ?? 1440;
   if (mins < open) return { open: false, label: `Opens at ${today.openTime}`, today };
@@ -92,7 +95,8 @@ export async function loadLiveQueue(salonId: number, now = new Date()) {
         customerPhone: customers.phone,
         serviceId: queueEntries.serviceId,
         serviceName: services.name,
-        servicePrice: services.price,
+        // The price locked when they joined; older entries fall back to the menu.
+        servicePrice: coalesce(queueEntries.servicePrice, services.price),
         staffId: queueEntries.staffId,
       }, joins: [{ table: "customers", on: eq(customers.id, queueEntries.customerId), left: false }, { table: "services", on: eq(services.id, queueEntries.serviceId), left: false }], where: and(
           eq(queueEntries.salonId, salonId),
@@ -100,6 +104,26 @@ export async function loadLiveQueue(salonId: number, now = new Date()) {
         ), orderBy: [queueEntries.position, queueEntries.id] }),
     staffRepository.find(salonId, { select: { id: staff.id, name: staff.name, active: staff.active, onShift: staff.onShift }, where: eq(staff.salonId, salonId), orderBy: [staff.id] }),
   ]);
+
+  // Today's remaining appointments hold their barber's chair, so walk-in
+  // estimates fit around them. A booked customer already in the live queue is
+  // counted there instead.
+  const queuedCustomers = new Set(rows.map((r) => r.customerId));
+  const reservations = (
+    await bookingRepository.find(salonId, { select: {
+        staffId: bookings.staffId,
+        scheduledAt: bookings.scheduledAt,
+        durationMin: bookings.durationMin,
+        customerId: bookings.customerId,
+      }, where: and(
+          eq(bookings.salonId, salonId),
+          gte(bookings.scheduledAt, salonStartOfDay(now)),
+          lte(bookings.scheduledAt, salonEndOfDay(now)),
+          inArray(bookings.status, ["confirmed", "arrived"]),
+        ) })
+  )
+    .filter((b) => b.staffId != null && !queuedCustomers.has(b.customerId))
+    .map((b) => ({ staffId: b.staffId as number, start: b.scheduledAt, durationMin: b.durationMin }));
 
   const staffNames = new Map(chairsRaw.map((s) => [s.id, s.name]));
   const chairs = chairsRaw
@@ -115,7 +139,7 @@ export async function loadLiveQueue(salonId: number, now = new Date()) {
     startedAt: r.startedAt,
   }));
 
-  const projection = projectQueue(engineEntries, chairs, now);
+  const projection = projectQueue(engineEntries, chairs, now, reservations);
 
   const entries: LiveEntry[] = rows.map((r) => {
     const p = projection.byEntry.get(r.id);
@@ -163,6 +187,20 @@ export async function getActiveOffers(salonId: number) {
   return rows.filter((o) => o.active && (!o.expiresAt || o.expiresAt.getTime() > now));
 }
 
+/**
+ * The customer with this phone number, however it was typed. Older records may
+ * be stored as "+91…"; if two legacy spellings exist, the exact match wins,
+ * then the most recently active record.
+ */
+export async function findCustomerByPhone(salonId: number, input: string) {
+  const phone = canonicalPhone(input);
+  const matches: Expression<boolean> = {
+    evaluate: (row) => samePhone(String(row.customers?.phone ?? ""), phone),
+  };
+  const rows = await customerRepository.find(salonId, { where: and(eq(customers.salonId, salonId), matches), orderBy: [desc(customers.lastActivityAt), customers.id] });
+  return rows.find((row) => row.phone === phone) ?? rows[0] ?? null;
+}
+
 /** Finds-or-creates the single customer record for this phone inside this tenant. */
 export async function upsertCustomer(params: {
   salonId: number;
@@ -174,11 +212,11 @@ export async function upsertCustomer(params: {
   email?: string | null;
 }) {
   return mutate(params.salonId, async () => {
-  const phone = params.phone.replace(/[^\d+]/g, "");
-  const existing = await customerRepository.find(params.salonId, { where: and(eq(customers.salonId, params.salonId), eq(customers.phone, phone)), limit: 1 });
+  const phone = canonicalPhone(params.phone);
+  const existing = await findCustomerByPhone(params.salonId, phone);
 
-  if (existing[0]) {
-    const row = existing[0];
+  if (existing) {
+    const row = existing;
     const patch: Partial<import("@/lib/firestore/entities").Customer> = { lastActivityAt: new Date() };
     if (params.name && params.name !== row.name && row.name.trim() === "") patch.name = params.name;
     if (params.preferredStaffId) patch.preferredStaffId = params.preferredStaffId;

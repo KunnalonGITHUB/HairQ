@@ -1,9 +1,10 @@
-import { bookingRepository, staffRepository } from "@/lib/firestore/repositories";
-import { and, eq } from "@/lib/firestore/query";
+import { bookingRepository, endLinkedQueueEntry, staffRepository } from "@/lib/firestore/repositories";
+import { and, coalesce, eq } from "@/lib/firestore/query";
 
 import { bookings, customers, services, staff } from "@/lib/firestore/fields";
 import { fail, guarded, ok } from "@/lib/api-helpers";
 import { getSalonBySlug } from "@/lib/salon-data";
+import { syncQueueNotifications } from "@/lib/queue-actions";
 
 export async function GET(_request: Request, ctx: { params: Promise<{ slug: string; token: string }> }) {
   return guarded(async () => {
@@ -19,7 +20,7 @@ export async function GET(_request: Request, ctx: { params: Promise<{ slug: stri
         status: bookings.status,
         notes: bookings.notes,
         serviceName: services.name,
-        servicePrice: services.price,
+        servicePrice: coalesce(bookings.servicePrice, services.price),
         customerName: customers.name,
         customerId: customers.id,
         customerPhone: customers.phone,
@@ -62,6 +63,10 @@ export async function DELETE(_request: Request, ctx: { params: Promise<{ slug: s
     if (!booking) return fail("We couldn't find that appointment.", 404);
     if (booking.status === "completed") return fail("That appointment is already complete.");
 
+    // If the salon already moved this appointment into the live queue, release that place too.
+    if (await endLinkedQueueEntry(salon.id, booking.id, "cancelled", "You're already in the chair — please talk to the salon.")) {
+      await syncQueueNotifications(salon.id, salon.name, salon.slug);
+    }
     await bookingRepository.update(salon.id, eq(bookings.id, booking.id), { status: "cancelled" });
     return ok({ ok: true });
   });

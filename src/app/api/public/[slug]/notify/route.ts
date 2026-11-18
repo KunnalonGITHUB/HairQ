@@ -6,6 +6,30 @@ import { and, desc, eq, isNull } from "@/lib/firestore/query";
 import { customers, notifications, pushSubscriptions } from "@/lib/firestore/fields";
 import { bool, fail, guarded, num, ok, str } from "@/lib/api-helpers";
 import { getSalonBySlug } from "@/lib/salon-data";
+import { sendPushToCustomers } from "@/lib/web-push";
+
+const REPLAY_WINDOW_MS = 10 * 60 * 1000;
+
+async function replayRecentAlert(
+  salon: { id: number; slug: string; logoUrl: string | null },
+  customerId: number,
+) {
+  const recent = await notificationRepository.find(salon.id, { where: and(eq(notifications.salonId, salon.id), eq(notifications.customerId, customerId), isNull(notifications.readAt)), orderBy: [desc(notifications.deliveredAt)], limit: 1 });
+  const alert = recent[0];
+  if (!alert || !["queue", "booking"].includes(alert.type)) return;
+  if (Date.now() - alert.deliveredAt.getTime() > REPLAY_WINDOW_MS) return;
+  const type = alert.type as "queue" | "booking";
+  await sendPushToCustomers(salon.id, [customerId], {
+    title: alert.title,
+    body: alert.body,
+    url: alert.url ?? `/s/${salon.slug}`,
+    type,
+    icon: salon.logoUrl || `/s/${salon.slug}/icon.svg`,
+    badge: `/s/${salon.slug}/icon.svg`,
+    tag: `hairq-${type}-${salon.id}`,
+    requireInteraction: type === "queue",
+  });
+}
 
 export async function GET(request: Request, ctx: { params: Promise<{ slug: string }> }) {
   return guarded(async () => {
@@ -92,13 +116,24 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
       values.endpoint = endpoint;
     }
 
-    if (existing[0]) {
-      const [updated] = await pushSubscriptionRepository.update(salon.id, eq(pushSubscriptions.id, existing[0].id), values);
-      return ok({ subscription: publicSubscription(updated), pushReady: hasTransport });
+    const previous = existing[0];
+    const wasReady = Boolean(previous?.endpoint && previous?.p256dh && previous?.auth && !previous?.invalidAt);
+
+    let response: Response;
+    if (previous) {
+      const [updated] = await pushSubscriptionRepository.update(salon.id, eq(pushSubscriptions.id, previous.id), values);
+      response = ok({ subscription: publicSubscription(updated), pushReady: hasTransport });
+    } else {
+      const [created] = await pushSubscriptionRepository.create(salon.id, { salonId: salon.id, customerId, ...values });
+      await customerRepository.update(salon.id, eq(customers.id, customerId), { lastActivityAt: new Date() });
+      response = ok({ subscription: publicSubscription(created), pushReady: hasTransport }, 201);
     }
 
-    const [created] = await pushSubscriptionRepository.create(salon.id, { salonId: salon.id, customerId, ...values });
-    await customerRepository.update(salon.id, eq(customers.id, customerId), { lastActivityAt: new Date() });
-    return ok({ subscription: publicSubscription(created), pushReady: hasTransport }, 201);
+    // The booking confirmation (or first queue alert) is written moments before
+    // the browser finishes subscribing, so it missed the device. When push first
+    // becomes usable, deliver that latest unread alert once. Opt-ins and
+    // permission are still checked by the sender, which runs after commit.
+    if (hasTransport && !wasReady) await replayRecentAlert(salon, customerId);
+    return response;
   });
 }

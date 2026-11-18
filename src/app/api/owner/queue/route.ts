@@ -12,7 +12,7 @@ import {
   upsertCustomer,
 } from "@/lib/salon-data";
 import { syncQueueNotifications } from "@/lib/queue-actions";
-import { startOfDay } from "@/lib/time";
+import { salonStartOfDay } from "@/lib/salon-time";
 
 export async function GET(request: Request) {
   return withOwner(async (user) => {
@@ -22,7 +22,7 @@ export async function GET(request: Request) {
       loadLiveQueue(user.salonId),
       serviceRepository.find(user.salonId, { where: and(eq(services.salonId, user.salonId), eq(services.active, true)), orderBy: [services.sortOrder, services.id] }),
       staffRepository.find(user.salonId, { where: eq(staff.salonId, user.salonId), orderBy: [staff.id] }),
-      visitRepository.find(user.salonId, { select: { waitMin: visits.waitMin, amount: visits.amount }, where: and(eq(visits.salonId, user.salonId), gte(visits.completedAt, startOfDay(new Date()))) }),
+      visitRepository.find(user.salonId, { select: { waitMin: visits.waitMin, amount: visits.amount }, where: and(eq(visits.salonId, user.salonId), gte(visits.completedAt, salonStartOfDay(new Date()))) }),
     ]);
 
     const avgWait = todayVisits.length
@@ -99,6 +99,7 @@ export async function POST(request: Request) {
         staffId: staffId ?? null,
         token: newToken(10),
         durationMin: service.durationMin,
+        servicePrice: service.price,
         source: bool(body.online) ? "online" : "walk_in",
         notes: str(body.notes) || null,
         position,

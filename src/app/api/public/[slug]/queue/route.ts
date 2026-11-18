@@ -66,7 +66,16 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
           inArray(queueEntries.status, ["waiting", "serving"]),
         ), limit: 1 });
     if (existing[0]) {
-      return ok({ token: existing[0].token, alreadyInQueue: true });
+      // A phone number alone must not hand out someone's ticket (it can cancel
+      // their place). Only the device that already holds this ticket gets it back.
+      // Returning an error also discards the customer upsert above.
+      if (str(body.ticket) !== existing[0].token) {
+        return fail(
+          "This phone number is already in the queue. Open your ticket on the phone you joined with, or ask the front desk.",
+          409,
+        );
+      }
+      return ok({ token: existing[0].token, customerId: customer.id, alreadyInQueue: true });
     }
 
     const position = await nextQueuePosition(salon.id);
@@ -77,6 +86,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
         staffId: staffId ?? null,
         token: newToken(10),
         durationMin: service.durationMin,
+        servicePrice: service.price,
         source: "online",
         notes: str(body.notes) || null,
         position,

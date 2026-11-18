@@ -14,6 +14,7 @@ import {
   openStatus,
 } from "@/lib/salon-data";
 import { DAY_NAMES, clockLabel, humanDuration, minutesToLabel, toMinutes } from "@/lib/time";
+import { salonWeekday } from "@/lib/salon-time";
 
 export const dynamic = "force-dynamic";
 
@@ -273,7 +274,7 @@ export default async function SalonWebsite({ params }: { params: Promise<{ slug:
               key={h.dayOfWeek}
               className="flex items-center justify-between border-b border-line py-2.5 text-[13.5px] last:border-0"
             >
-              <span className={h.dayOfWeek === new Date().getDay() ? "font-semibold" : "text-muted"}>
+              <span className={h.dayOfWeek === salonWeekday(new Date()) ? "font-semibold" : "text-muted"}>
                 {DAY_NAMES[h.dayOfWeek]}
               </span>
               <span className="num text-ink-2">

@@ -21,6 +21,13 @@ export type EngineChair = {
   name: string;
 };
 
+/** An upcoming appointment that holds a barber's chair for a window of time. */
+export type EngineReservation = {
+  staffId: number;
+  start: Date | string;
+  durationMin: number;
+};
+
 export type Projection = {
   id: number;
   /** 1-based position among waiting customers */
@@ -51,11 +58,32 @@ export function projectQueue(
   entries: EngineEntry[],
   chairs: EngineChair[],
   now: Date = new Date(),
+  reservations: EngineReservation[] = [],
+  /** Service length assumed for a brand-new joiner when fitting around appointments. */
+  newcomerDurationMin = 30,
 ): QueueProjection {
   const chairState = (chairs.length > 0 ? chairs : [{ staffId: -1, name: "Chair 1" }]).map((c) => ({
     staffId: c.staffId,
     freeAt: now.getTime(),
+    // Appointments still ahead of us, for this barber's chair, in time order.
+    held: reservations
+      .filter((r) => r.staffId === c.staffId)
+      .map((r) => {
+        const start = (asDate(r.start) ?? now).getTime();
+        return { start, end: start + r.durationMin * 60000 };
+      })
+      .filter((r) => r.end > now.getTime())
+      .sort((a, b) => a.start - b.start),
   }));
+
+  /** First moment from `from` when this chair has `durationMin` free of appointments. */
+  const fitStart = (chair: (typeof chairState)[number], from: number, durationMin: number) => {
+    let start = Math.max(from, now.getTime());
+    for (const slot of chair.held) {
+      if (start < slot.end && slot.start < start + durationMin * 60000) start = slot.end;
+    }
+    return start;
+  };
 
   const serving = entries.filter((e) => e.status === "serving");
   const waiting = entries
@@ -85,8 +113,19 @@ export function projectQueue(
     const preferred = entry.staffId
       ? chairState.find((c) => c.staffId === entry.staffId)
       : undefined;
-    const chair = preferred ?? chairState.reduce((a, b) => (a.freeAt <= b.freeAt ? a : b));
-    const startAt = new Date(Math.max(chair.freeAt, now.getTime()));
+    // Without appointments this is the chair that frees first, exactly as before.
+    let chair = preferred ?? chairState[0];
+    let start = fitStart(chair, chair.freeAt, entry.durationMin);
+    if (!preferred) {
+      for (const candidate of chairState) {
+        const candidateStart = fitStart(candidate, candidate.freeAt, entry.durationMin);
+        if (candidateStart < start) {
+          chair = candidate;
+          start = candidateStart;
+        }
+      }
+    }
+    const startAt = new Date(start);
     const endAt = new Date(startAt.getTime() + entry.durationMin * 60000);
     chair.freeAt = endAt.getTime();
     workloadMin += entry.durationMin;
@@ -101,8 +140,9 @@ export function projectQueue(
     });
   });
 
-  const nextChair = chairState.reduce((a, b) => (a.freeAt <= b.freeAt ? a : b));
-  const nextOpeningAt = new Date(Math.max(nextChair.freeAt, now.getTime()));
+  const nextOpeningAt = new Date(
+    Math.min(...chairState.map((c) => fitStart(c, c.freeAt, newcomerDurationMin))),
+  );
 
   return {
     byEntry,

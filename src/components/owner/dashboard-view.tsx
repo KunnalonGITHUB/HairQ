@@ -5,7 +5,7 @@ import { PageHead, Panel, StatTile } from "@/components/owner/shell";
 import { IconChevronRight, IconPlus, IconQueue } from "@/components/icons";
 import { cx, EmptyState, StatusChip, usePoll } from "@/components/ui";
 import { humanDuration } from "@/lib/time";
-import { formatSalonTime } from "@/lib/salon-time";
+import { formatSalonTime, salonClock } from "@/lib/salon-time";
 
 type Summary = {
   salon: { name: string; slug: string; queueStatus: string; currency: string; maxQueueSize: number };
@@ -68,7 +68,8 @@ export function DashboardView({ ownerName }: { ownerName: string }) {
     );
   }
 
-  const hour = new Date().getHours();
+  // Salon hour, matching the busy-hours buckets from the server.
+  const hour = salonClock(new Date()).hour;
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const peak = [...data.range.hours].sort((a, b) => b.count - a.count)[0];
   const maxHour = Math.max(1, ...data.range.hours.map((h) => h.count));
@@ -214,7 +215,7 @@ export function DashboardView({ ownerName }: { ownerName: string }) {
                   <div
                     className={cx(
                       "w-full rounded-sm transition-colors",
-                      h.hour === new Date().getHours() ? "bg-clay" : "bg-line-2 group-hover:bg-clay/60",
+                      h.hour === hour ? "bg-clay" : "bg-line-2 group-hover:bg-clay/60",
                     )}
                     style={{ height: `${Math.max(3, (h.count / maxHour) * 72)}px` }}
                     title={`${h.count} customers around ${h.hour}:00`}

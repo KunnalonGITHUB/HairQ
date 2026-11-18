@@ -137,6 +137,8 @@ export interface QueueEntry {
   extraServices: BookingExtraService[] | null;
   /** Service price plus extras, recorded once at completion. */
   finalAmount: number | null;
+  /** Menu price when the customer joined; null on entries created before price locking. */
+  servicePrice: number | null;
 }
 
 export interface Booking {
@@ -156,6 +158,8 @@ export interface Booking {
   extraServices: BookingExtraService[] | null;
   /** Booked service price plus extras, recorded once at completion. */
   finalAmount: number | null;
+  /** Menu price when the appointment was booked; null on bookings made before price locking. */
+  servicePrice: number | null;
 }
 
 /** serviceId is null for a custom service typed in by the owner. */
@@ -176,6 +180,10 @@ export interface Visit {
   durationMin: number;
   waitMin: number;
   completedAt: Date;
+  /** Price of the main service within `amount`; null on visits recorded before extras were itemised. */
+  serviceAmount: number | null;
+  /** Extras included in `amount`; null on older visits. */
+  extraServices: BookingExtraService[] | null;
 }
 
 export interface Offer {

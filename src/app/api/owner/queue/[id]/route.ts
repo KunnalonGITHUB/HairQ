@@ -32,12 +32,11 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
       case "complete": {
         if (entry.status === "completed") return ok({ ok: true });
         if (!["waiting", "serving"].includes(entry.status)) return fail("That queue entry has already ended.", 409);
-        if (entry.status !== "serving") {
-          await queueRepository.update(user.salonId, eq(queueEntries.id, entryId), { status: "serving", startedAt: entry.startedAt ?? new Date() });
-        }
-        // Optional extra services, validated and priced inside the completion transaction.
+        // Waiting customers complete directly: no detour through "serving", which
+        // would fail when their barber is busy and record a 1-minute service.
+        // Optional extras are validated and priced inside the completion
+        // transaction, which also renumbers the line.
         await recordCompletion(user.salonId, entryId, completionExtrasFrom(body.extraServices));
-        await resequence(user.salonId);
         break;
       }
       case "no_show":
@@ -73,6 +72,7 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
           if (!svc[0]) return fail("That service isn't available.");
           patch.serviceId = serviceId;
           patch.durationMin = svc[0].durationMin;
+          patch.servicePrice = svc[0].price;
         }
         if ("staffId" in body) patch.staffId = num(body.staffId);
         if ("notes" in body) patch.notes = str(body.notes) || null;

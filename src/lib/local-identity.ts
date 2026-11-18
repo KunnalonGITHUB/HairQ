@@ -26,7 +26,9 @@ export function readProfile(slug: string): LocalProfile {
 
 export function writeProfile(slug: string, patch: LocalProfile): LocalProfile {
   if (typeof window === "undefined") return {};
-  const next = { ...readProfile(slug), ...patch };
+  // A missing value never erases what we already know (e.g. customerId).
+  const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) as LocalProfile;
+  const next = { ...readProfile(slug), ...defined };
   try {
     window.localStorage.setItem(key(slug), JSON.stringify(next));
   } catch {

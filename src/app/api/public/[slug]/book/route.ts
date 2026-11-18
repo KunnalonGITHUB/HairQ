@@ -164,6 +164,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ slug: stri
         token: newToken(10),
         scheduledAt,
         durationMin: svc[0].durationMin,
+        servicePrice: svc[0].price,
         source: "online",
         notes: str(body.notes) || null,
       });

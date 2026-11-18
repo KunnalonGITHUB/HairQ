@@ -1,5 +1,6 @@
 import { publicSubscription } from "@/lib/firestore/public-dto";
-import { requestJson } from "@/lib/api-helpers";
+import { requestJson, validPhone } from "@/lib/api-helpers";
+import { canonicalPhone, samePhone } from "@/lib/phone";
 import { customerRepository, visitRepository, bookingRepository, queueRepository, pushSubscriptionRepository, staffRepository, serviceRepository, notificationRepository } from "@/lib/firestore/repositories";
 import { and, desc, eq, gte, inArray } from "@/lib/firestore/query";
 
@@ -113,7 +114,13 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
       if (!name) return fail("Name can't be empty.");
       patch.name = name;
     }
-    if ("phone" in body) patch.phone = str(body.phone);
+    if ("phone" in body) {
+      const phone = str(body.phone);
+      const current = await customerRepository.find(user.salonId, { select: { phone: customers.phone }, where: and(eq(customers.id, customerId), eq(customers.salonId, user.salonId)), limit: 1 });
+      // The same number typed differently is left as stored. A new number is
+      // stored in one spelling and rejected if another customer already has it.
+      if (!current[0] || !samePhone(phone, current[0].phone)) patch.phone = validPhone(phone) ? canonicalPhone(phone) : phone;
+    }
     if ("email" in body) patch.email = str(body.email) || null;
     if ("notes" in body) patch.notes = str(body.notes) || null;
     if ("birthday" in body) patch.birthday = str(body.birthday) || null;
